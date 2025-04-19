@@ -2,5 +2,8 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/bladeRF" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/bladeRF/bladeRF" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/bladeRF/thirdparty/analogdevicesinc/no-OS" vcs="Git" />
   </component>
 </project>
