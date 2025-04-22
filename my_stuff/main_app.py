@@ -153,7 +153,8 @@ buffer_lock = threading.Lock()
 def fft_plot_worker():
     #TODO clear buffer after plot
 
-    global shared_buffer, buffer_lock, fft_curve, fs
+    global shared_buffer, buffer_lock, fft_curve, fs, rx_freq
+    prev_fft_db = None
     while True:
         with buffer_lock:
             data = shared_buffer.copy()
@@ -162,11 +163,20 @@ def fft_plot_worker():
             # Compute FFT
             fft_vals = np.fft.fftshift(np.fft.fft(data))
             fft_db = 20 * np.log10(np.abs(fft_vals) + 1e-6)
-            freqs = np.fft.fftshift(np.fft.fftfreq(len(data), 1 / fs))
-            with buffer_lock:
-                shared_buffer[:] = fft_db[:len(shared_buffer)]
 
-        time.sleep(0.2)  # adjust to control update rate
+
+            # Only update the plot if the data has changed
+
+            if prev_fft_db is None or not np.allclose(fft_db, prev_fft_db):
+                # Center frequencies around rx_frequency
+                freqs = np.fft.fftshift(np.fft.fftfreq(len(data), 1 / fs))
+                freqs_mhz = (freqs + rx_freq) / 1e6  # in MHz
+
+                # Update the plot with new data
+                fft_curve.setData(freqs_mhz, fft_db)
+                prev_fft_db = fft_db  # Update the previous FFT data to the current one
+
+        time.sleep(0.5)  # adjust to control update rate
 
 
 
@@ -342,6 +352,7 @@ tx_pool = ThreadPool(processes=1)
 
 
 def rx_loop():
+    global rx_freq
     while True:
         rx_ch = _bladerf.CHANNEL_RX(config.getint('bladerf2-rx', 'rx_channel'))
         rx_freq = int(config.getfloat('bladerf2-rx', 'rx_frequency'))
@@ -378,13 +389,21 @@ if __name__ == "__main__":
     win = pg.GraphicsLayoutWidget(title="Live Signal and FFT Plot")
     win.show()
 
-
-    time_plot = win.addPlot(title="Time Domain I Samples")
-    time_curve = time_plot.plot(pen='y')
-
-
+    # Setup the FFT plot
     fft_plot = win.addPlot(title="FFT of Signal")
     fft_curve = fft_plot.plot(pen='g')
+
+    # Label axes
+    fft_plot.setLabel('bottom', 'Frequency (MHz)')
+    fft_plot.setLabel('left', 'Magnitude (dB)')
+
+    # FIX THE AXES — no auto-rescale
+    center_freq_mhz = rx_freq / 1e6  # Convert to MHz
+    bandwidth_mhz = BW / 1e6  # Convert to MHz
+    fft_plot.setXRange(center_freq_mhz - bandwidth_mhz / 2,
+                       center_freq_mhz + bandwidth_mhz / 2, padding=0)
+
+    fft_plot.setYRange(-100, 0, padding=0)  # dB range — adjust based on your signal
 
     # Set up timer to refresh GUI
     timer = QtCore.QTimer()
