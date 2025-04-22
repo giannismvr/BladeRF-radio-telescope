@@ -1,26 +1,5 @@
 #!/usr/bin/env python3
 ###############################################################################
-#
-# Copyright (c) 2018-present Nuand LLC
-#
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-# THE SOFTWARE.
-#
 ###############################################################################
 #
 # Basic example of using bladeRF Python bindings for full duplex TX/RX.
@@ -50,126 +29,138 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 import os
 import struct
 
-# File path to monitor
+import numpy as np
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore, QtWidgets
+
+# Path to your binary file
+import numpy as np
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore, QtWidgets
+
+import numpy as np
+import pyqtgraph as pg
+from PyQt5 import QtCore, QtWidgets
+from configparser import ConfigParser
+
+# Path to your binary file
 file_path = "/Users/giannis/PycharmProjects/final_radiotelescope/my_stuff/my_rx_samples.bin"
 
-# Create the application window
+# Load configuration
+config = ConfigParser()
+config.read('/Users/giannis/PycharmProjects/final_radiotelescope/my_stuff/my_configuration.ini')
+
+# GUI setup
 app = QtWidgets.QApplication([])
-win = pg.GraphicsLayoutWidget(title="Live IQ Plot")
-plot = win.addPlot(title="Time Domain I Samples")
-curve = plot.plot(pen='y')
+win = pg.GraphicsLayoutWidget(title="Live Signal and FFT Plot")
 win.show()
 
-# Track where we last read from
+time_plot = win.addPlot(title="Time Domain I Samples")
+time_curve = time_plot.plot(pen='y')
+
+fft_plot = win.addPlot(title="FFT of Signal")
+fft_curve = fft_plot.plot(pen='g')
+fft_plot.setLabel('bottom', 'Frequency (MHz)')
+fft_plot.setLabel('left', 'Magnitude (dB)')
+
+# Track last file position
 last_position = 0
 
-def update():
-    global last_position
-    try:
-        with open(file_path, "rb") as f:
-            f.seek(last_position)
-            new_data = f.read()
-            last_position += len(new_data)
+# Get parameters from config
+N_SAMPLES = int(float(config['bladerf2-rx']['rx_num_samples']))
+BW = float(config['bladerf2-rx']['rx_bandwidth'])      # Hz
+rx_freq = float(config['bladerf2-rx']['rx_frequency']) # Hz
+fs = float(config['bladerf2-rx']['rx_samplerate'])     # Hz
 
-        # Only update if we have new data
-        if len(new_data) >= 4:
-            # Convert to int16 (IQ interleaved)
-            iq = np.frombuffer(new_data, dtype=np.int16)
-            i = iq[::2]
-            # You could also get Q: q = iq[1::2]
-            curve.setData(i[-1024:])  # Show last 1024 samples
-    except Exception as e:
-        print("Error reading file:", e)
+import sys
+import numpy as np
+from PyQt5 import QtCore, QtWidgets
+import pyqtgraph as pg
 
-timer = QtCore.QTimer()
-timer.timeout.connect(update)
-timer.start(100)
+import sys
+import numpy as np
+from PyQt5 import QtCore, QtWidgets
+import pyqtgraph as pg
 
 
+class RealTimeFFTPlot(QtWidgets.QMainWindow):
+
+    # TODO ignore this class
+    # TODO create another thread that constantly checks solely the rx buffer for data and plots them
+    # TODO main folder should be the rx forlder so that overwriting becomes easier
+    # TODO make a separate folder (permanent data logger) in which you append the current rx_buffer-folder data
+    # TODO refresh the plot every 1 sec for starters and clear the buffer every...
+
+    def __init__(self, file_path):
+        super().__init__()
+
+        self.setWindowTitle("Real-time FFT Plot")
+        self.resize(800, 600)
+
+        # Create a PlotWidget and set it as the central widget
+        self.plot_widget = pg.PlotWidget()
+        self.setCentralWidget(self.plot_widget)
+
+        # Initialize FFT plot
+        self.fft_curve = self.plot_widget.plot(pen='y')
+
+        # Time domain data (initially empty)
+        self.sample_rate = 1000  # Sample rate (samples per second)
+        self.num_samples = 1024  # Number of samples in each FFT window
+        self.update_interval = 50  # Time in ms between updates
+        self.time_data = np.zeros(self.num_samples)  # Initialize with zeros
+
+        # File path to the received binary signal
+        self.file_path = file_path
+        self.file = open(self.file_path, 'rb')  # Open the binary file for reading
+
+        # Set up a timer to update the plot every "update_interval" ms
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.update_fft_plot)
+        self.timer.start(self.update_interval)
+
+    def update_fft_plot(self):
+        """Update the FFT plot with new data every time the timer fires."""
+
+        # Read a chunk of the binary data from the file
+        signal_chunk = np.fromfile(self.file, dtype=np.complex64, count=self.num_samples)
+
+        # Check if the chunk is empty, and reset file pointer if needed
+        if len(signal_chunk) == 0:
+            self.file.seek(0)  # Reset to the beginning of the file
+            signal_chunk = np.fromfile(self.file, dtype=np.complex64, count=self.num_samples)
+
+        # Convert complex signal into real and imaginary parts
+        if signal_chunk.size == self.num_samples:
+            signal = np.real(signal_chunk)  # Use real part of the signal (or both parts for complex signals)
+
+            # Shift data left (for real-time streaming simulation)
+            self.time_data = np.roll(self.time_data, -len(signal))
+            self.time_data[-len(signal):] = signal  # Correct assignment with matching size
+
+            # Compute the FFT of the time-domain signal
+            fft_data = np.fft.fft(self.time_data)
+            fft_freqs = np.fft.fftfreq(len(self.time_data), 1 / self.sample_rate)
+            fft_magnitude = np.abs(fft_data)
+
+            # Update the FFT plot (display the positive frequencies)
+            self.fft_curve.setData(fft_freqs[:len(fft_freqs) // 2], fft_magnitude[:len(fft_magnitude) // 2])
+
+    def closeEvent(self, event):
+        """Ensure the file is closed properly when the application is closed."""
+        self.file.close()
+        event.accept()
 
 
-# Plotting thread
-def live_plot_thread(shared_buffer, lock, stop_event):
-    plt.ion()  # Turn on interactive mode
-    fig, ax = plt.subplots()
-    line, = ax.plot([], [], lw=1)
-    ax.set_ylim(-1, 1)
-    ax.set_xlim(0, 4096)  # Initial window
-    ax.set_title("Real-Time RX Signal (I Component)")
-    ax.set_xlabel("Sample Index")
-    ax.set_ylabel("Amplitude")
+# # Timer for real-time updates
+# timer = QtCore.QTimer()
+# timer.timeout.connect(update)
+# timer.start(100)
 
-    while not stop_event.is_set():
-        lock.acquire()
-        if shared_buffer['data'] is not None:
-            current_samples = shared_buffer['data']
-            lock.release()
 
-            line.set_ydata(current_samples.real)
-            line.set_xdata(np.arange(len(current_samples)))
-            ax.set_xlim(0, len(current_samples))
-            ax.set_ylim(current_samples.real.min(), current_samples.real.max())
-            fig.canvas.draw()
-            fig.canvas.flush_events()
-        else:
-            lock.release()
-        time.sleep(0.05)  # Small delay to avoid CPU burn
+# Start the Qt event loop
+# app.exec_()
 
-# Main RX logic
-def rx_main():
-    from bladerf import _bladerf
-    import numpy as np
-
-    # Open first available device
-    dev = _bladerf.BladeRF()
-
-    # Configure RX channel
-    ch = dev.Channel(0)  # channel 0 (usually RX)
-    ch.frequency = 2.45e9  # Example: 2.45 GHz
-    ch.sample_rate = 2e6   # 2 MSPS
-    ch.gain = 30           # Adjust gain as needed
-
-    dev.sync_config(layout=_bladerf.ChannelLayout.RX_X1,
-                    fmt=_bladerf.Format.SC16_Q11,
-                    num_buffers=16,
-                    buffer_size=4096,
-                    num_transfers=8,
-                    stream_timeout=3500)
-
-    ch.enable = True  # Enable RX
-
-    shared_buffer = {'data': None}
-    lock = threading.Lock()
-    stop_event = threading.Event()
-
-    plot_thread = threading.Thread(target=live_plot_thread, args=(shared_buffer, lock, stop_event))
-    plot_thread.start()
-
-    try:
-        while True:
-            # Create buffer
-            buf = bytearray(4096 * 4)  # 4 bytes per sample (16-bit I + 16-bit Q)
-
-            # Read samples
-            dev.sync_rx(buf, 4096)
-
-            # Convert to numpy complex64 (Q11 format → float)
-            iq = np.frombuffer(buf, dtype=np.int16).astype(np.float32).view(np.complex64)
-            iq /= 2048  # Normalize SC16 Q11 format
-
-            lock.acquire()
-            shared_buffer['data'] = iq
-            lock.release()
-
-    except KeyboardInterrupt:
-        print("Stopping...")
-    finally:
-        stop_event.set()
-        plot_thread.join()
-        ch.enable = False
-        dev.close()
-
-# Run main logic
 
 
 
@@ -311,6 +302,7 @@ def transmit(device, channel: int, freq: int, rate: int, gain: int,
             repeat_inf = (repeat < 1)
             while True:
                 # Write to bladeRF
+
                 device.sync_tx(buf, num)
 
                 if ((rx_done != None) and rx_done.is_set()):
@@ -406,8 +398,7 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 # Load Configuration
 # =============================================================================
 
-config = ConfigParser()
-config.read('/Users/giannis/PycharmProjects/final_radiotelescope/my_stuff/my_configuration.ini')
+
 
 # Set libbladeRF verbosity level
 verbosity = config.get('common', 'libbladerf_verbosity').upper()
@@ -476,7 +467,7 @@ def run_rx():
     # Continuously write samples to the .bin file
     loops = 0
     while True:
-        # update()
+        time.sleep(6)
         loops += 1
         if (loops > 100):
             break
@@ -489,6 +480,8 @@ def run_rx():
         rx_gain = int(config.getfloat(s, 'rx_gain'))
         rx_ns = int(config.getfloat(s, 'rx_num_samples'))
         rx_file = config.get(s, 'rx_file')
+
+        fft_size = N_SAMPLES
 
         print(rx_freq)
 
@@ -505,6 +498,12 @@ def run_rx():
                                       'rxfile': rx_file,
                                       'num_samples': rx_ns
                                       }).get()
+
+
+        #TODO append to rx data buffer
+        #TODO check if rx buffer is full
+        # TODO check if main file is full
+
         if (status < 0):
             print("Receive operation failed with error " + str(status))
 
@@ -515,9 +514,6 @@ def run_rx():
 
                                 !!!!!!!!!!!
             """
-
-
-
 
 for s in [ss for ss in config.sections() if board_name + '-' in ss]:
 
@@ -532,144 +528,23 @@ for s in [ss for ss in config.sections() if board_name + '-' in ss]:
 
         print("RUNNING")
 
-        if (s == board_name + '-tx'):
 
-            tx_ch = _bladerf.CHANNEL_TX(config.getint(s, 'tx_channel'))
-            tx_freq = int(config.getfloat(s, 'tx_frequency'))
-            tx_rate = int(config.getfloat(s, 'tx_samplerate'))
-            tx_gain = int(config.getfloat(s, 'tx_gain'))
-            tx_rpt = int(config.getfloat(s, 'tx_repeats'))
-            tx_file = config.get(s, 'tx_file')
-
-            # Make this blocking for now ...
-            status = tx_pool.apply_async(transmit,
-                                         (),
-                                         {'device': b,
-                                          'channel': tx_ch,
-                                          'freq': tx_freq,
-                                          'rate': tx_rate,
-                                          'gain': tx_gain,
-                                          'tx_start': None,
-                                          'rx_done': None,
-                                          'txfile': tx_file,
-                                          'repeat': tx_rpt
-                                          }).get()
-            if (status < 0):
-                print("Transmit operation failed with error " + str(status))
-
-                """
-                            The return value of status is given by calling the transmit def, which always returns
-                            an integer. Thus, simply referencing transmit as an argument of tx_pool.apply_async()
-                            "activates" the transmit def, which shall return an integer.
-
-                            !!!!!!!!!!!
-                """
-
-        elif (s == board_name + '-rx'):
+        if (s == board_name + '-rx'):
             # rx_main()
             # Start RX in a separate thread
             rx_thread = threading.Thread(target=run_rx)
             rx_thread.daemon = True
             rx_thread.start()
-            QtWidgets.QApplication.instance().exec()
+            # QtWidgets.QApplication.instance().exec()
             # app.exec()
+            # app.exec()
+            app = QtWidgets.QApplication(sys.argv)
+            window = RealTimeFFTPlot(file_path)
+            window.show()
+            sys.exit(app.exec_())
 
 
 
-        elif (s == board_name + '-txrx'):
-
-            rx_channels = [x.strip() for x in config.get(s, 'rx_channel').split(',')]
-            tx_channels = [x.strip() for x in config.get(s, 'tx_channel').split(',')]
-            rx_freqs = [x.strip() for x in config.get(s, 'rx_frequency').split(',')]
-            tx_freqs = [x.strip() for x in config.get(s, 'tx_frequency').split(',')]
-
-            if (len(rx_channels) != len(tx_channels)):
-                print("Configuration error in section " + s + ": "
-                                                              "rx_channels and tx_channels must be the same length.")
-                shutdown(error=-1, board=b)
-
-            if (len(rx_freqs) != len(tx_freqs)):
-                print("Configuration error in section " + s + ": "
-                                                              "rx_frequency and tx_frequency must be the same length.")
-                shutdown(error=-1, board=b)
-
-            # Create Events for signaling between RX/TX threads
-            rx_done = threading.Event()
-            tx_start = threading.Event()
-
-            for ch in range(0, len(rx_channels), 1):
-                for freq in range(0, len(rx_freqs), 1):
-                    rx_ch = _bladerf.CHANNEL_RX(int(rx_channels[ch]))
-                    rx_freq = int(float(rx_freqs[freq]))
-                    rx_rate = int(config.getfloat(s, 'rx_samplerate'))
-                    rx_gain = int(config.getfloat(s, 'rx_gain'))
-                    rx_ns = int(config.getfloat(s, 'rx_num_samples'))
-                    rx_file = config.get(s, 'rx_file')
-                    if (rx_file == "auto"):
-                        rx_file = "rx_" + \
-                                  "r" + rx_channels[ch] + \
-                                  "t" + tx_channels[ch] + "_" + \
-                                  str(int(float(rx_freqs[freq]) / (1e6))) + "M.bin"
-
-                    tx_ch = _bladerf.CHANNEL_TX(int(tx_channels[ch]))
-                    tx_freq = int(float(tx_freqs[freq]))
-                    tx_rate = int(config.getfloat(s, 'tx_samplerate'))
-                    tx_gain = int(config.getfloat(s, 'tx_gain'))
-                    tx_rpt = int(config.getfloat(s, 'tx_repeats'))
-                    tx_file = config.get(s, 'tx_file')
-
-                    print("rx_ch = {:2d} ".format(int(rx_channels[ch])) +
-                          "tx_ch = {:2d} ".format(int(tx_channels[ch])) +
-                          "rx_freq = {:10d} ".format(rx_freq) +
-                          "tx_freq = {:10d} ".format(tx_freq) +
-                          "rx_file = " + rx_file)
-
-                    # Start receiver thread
-                    rx_result = rx_pool.apply_async(receive,
-                                                    (),
-                                                    {'device': b,
-                                                     'channel': rx_ch,
-                                                     'freq': rx_freq,
-                                                     'rate': rx_rate,
-                                                     'gain': rx_gain,
-                                                     'tx_start': tx_start,
-                                                     'rx_done': rx_done,
-                                                     'rxfile': rx_file,
-                                                     'num_samples': rx_ns
-                                                     })
-
-                    # Start transmitter thread
-                    tx_result = tx_pool.apply_async(transmit,
-                                                    (),
-                                                    {'device': b,
-                                                     'channel': tx_ch,
-                                                     'freq': tx_freq,
-                                                     'rate': tx_rate,
-                                                     'gain': tx_gain,
-                                                     'tx_start': tx_start,
-                                                     'rx_done': rx_done,
-                                                     'txfile': tx_file,
-                                                     'repeat': tx_rpt
-                                                     })
-
-                    # Wait for RX thread to finish
-                    rx_result.wait()
-                    status = rx_result.get()
-
-                    if (status < 0):
-                        print("Receive operation failed with error " +
-                              str(status))
-
-                    # Wait for TX thread to finish
-                    tx_result.wait()
-                    status = tx_result.get()
-
-                    if (status < 0):
-                        print("Transmit operation failed with error " +
-                              str(status))
-
-                    tx_start.clear()
-                    rx_done.clear()
 
     else:
         print("SKIPPED [ Disabled ]")

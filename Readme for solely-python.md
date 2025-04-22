@@ -8,6 +8,10 @@ install cmake version > 3.5 and apply that version globally, for the whole compu
 
 pip install lncurses or sth like that, i dont remember whether i installed it via pip
 
+cd to the "bladeRF" folder
+
+Then:
+
 ```
 mkdir -p build
 cd build
