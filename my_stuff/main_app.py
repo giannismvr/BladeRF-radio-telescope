@@ -341,6 +341,34 @@ tx_pool = ThreadPool(processes=1)
 
 
 
+def rx_loop():
+    while True:
+        rx_ch = _bladerf.CHANNEL_RX(config.getint('bladerf2-rx', 'rx_channel'))
+        rx_freq = int(config.getfloat('bladerf2-rx', 'rx_frequency'))
+        rx_rate = int(config.getfloat('bladerf2-rx', 'rx_samplerate'))
+        rx_gain = int(config.getfloat('bladerf2-rx', 'rx_gain'))
+        rx_ns = int(config.getfloat('bladerf2-rx', 'rx_num_samples'))
+        rx_file = config.get('bladerf2-rx', 'rx_file')
+
+        status = receive(
+            device=b,
+            channel=rx_ch,
+            freq=rx_freq,
+            rate=rx_rate,
+            gain=rx_gain,
+            tx_start=None,
+            rx_done=None,
+            rxfile=rx_file,
+            num_samples=rx_ns
+        )
+
+        if status < 0:
+            print(f"Receive operation failed with error {status}")
+            break
+        time.sleep(0.1)
+
+
+
 if __name__ == "__main__":
     #TODO start the GUI
 
@@ -363,53 +391,33 @@ if __name__ == "__main__":
     timer.timeout.connect(update_fft_gui)  # <- Connect to your function
     timer.start(200)  # Refresh every 200ms
 
-    #TODO start thread
+
+
+    # Start RX thread
+    rx_thread = threading.Thread(target=rx_loop, daemon=True)
+    rx_thread.start()
+
+    #TODO start threads!!!!
 
     # Start the worker thread
     worker_thread = threading.Thread(target=fft_plot_worker)
     worker_thread.daemon = True  # Optional: Daemon thread will exit when the main program exits
     worker_thread.start()
 
-    while True:
-        rx_ch = _bladerf.CHANNEL_RX(config.getint('bladerf2-rx', 'rx_channel'))
-        rx_freq = int(config.getfloat('bladerf2-rx', 'rx_frequency'))
-        rx_rate = int(config.getfloat('bladerf2-rx', 'rx_samplerate'))
-        rx_gain = int(config.getfloat('bladerf2-rx', 'rx_gain'))
-        rx_ns = int(config.getfloat('bladerf2-rx', 'rx_num_samples'))
-        rx_file = config.get('bladerf2-rx', 'rx_file')
-        # Make this blocking for now ...
-        status = rx_pool.apply_async(receive,
-                                     (),
-                                     {'device': b,
-                                      'channel': rx_ch,
-                                      'freq': rx_freq,
-                                      'rate': rx_rate,
-                                      'gain': rx_gain,
-                                      'tx_start': None,
-                                      'rx_done': None,
-                                      'rxfile': rx_file,
-                                      'num_samples': rx_ns
-                                      })
-
+    # Start GUI loop (this must stay in the main thread!)
+    sys.exit(app.exec_())
         # if status < 0:
         #     print(f"Receive operation failed with error {status}")
         #     break  # Exit loop if receive failed
 
             # Refresh the GUI by updating the plot
             # Since GUI updates must happen in the main thread, we invoke the method
-            # that updates the plot
+            # that updates the plo
 
+"""
+    The return value of status is given by calling the transmit def, which always returns
+    an integer. Thus, simply referencing transmit as an argument of tx_pool.apply_async()
+    "activates" the transmit def, which shall return an integer.
 
-        # Optionally, introduce a small delay to avoid overloading the main loop
-        time.sleep(0.1)  # Adjust the delay as necessary
-
-        """
-            The return value of status is given by calling the transmit def, which always returns
-            an integer. Thus, simply referencing transmit as an argument of tx_pool.apply_async()
-            "activates" the transmit def, which shall return an integer.
-        
-            !!!!!!!!!!!
-        """
-
-    # Start the Qt event loop (this keeps the GUI alive)
-    sys.exit(app.exec_())
+    !!!!!!!!!!!
+"""
