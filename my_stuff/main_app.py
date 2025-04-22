@@ -16,12 +16,10 @@ from configparser import ConfigParser
 
 from bladerf import _bladerf
 
-
 import threading
 import numpy as np
 import matplotlib.pyplot as plt
 import time
-
 
 import numpy as np
 import pyqtgraph as pg
@@ -68,9 +66,9 @@ last_position = 0
 
 # Get parameters from config
 N_SAMPLES = int(float(config['bladerf2-rx']['rx_num_samples']))
-BW = float(config['bladerf2-rx']['rx_bandwidth'])      # Hz
-rx_freq = float(config['bladerf2-rx']['rx_frequency']) # Hz
-fs = float(config['bladerf2-rx']['rx_samplerate'])     # Hz
+BW = float(config['bladerf2-rx']['rx_bandwidth'])  # Hz
+rx_freq = float(config['bladerf2-rx']['rx_frequency'])  # Hz
+fs = float(config['bladerf2-rx']['rx_samplerate'])  # Hz
 
 import sys
 import numpy as np
@@ -160,8 +158,6 @@ class RealTimeFFTPlot(QtWidgets.QMainWindow):
 
 # Start the Qt event loop
 # app.exec_()
-
-
 
 
 # =============================================================================
@@ -271,6 +267,7 @@ def transmit(device, channel: int, freq: int, rate: int, gain: int,
 
     # Configure bladeRF
     ch = device.Channel(channel)
+
     ch.frequency = freq
     ch.sample_rate = rate
     ch.gain = gain
@@ -339,7 +336,9 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
     # Configure BladeRF
     ch = device.Channel(channel)
+    print("got here !!!!!!!!!!!!!!!!!!!!!!!!!!!")
     ch.frequency = freq
+    print("but not here******************")
     ch.sample_rate = rate
     ch.gain = gain
 
@@ -359,6 +358,14 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
     bytes_per_sample = 4
     buf = bytearray(1024 * bytes_per_sample)
     num_samples_read = 0
+
+    # ---- 👇 Add FFT buffer here ----
+    fft_buffer_size = 4096  # samples to store for plotting
+    fft_buffer = np.zeros(fft_buffer_size, dtype=np.complex64)
+
+    # Timer for FFT update
+    last_fft_plot = time.time()
+    plot_interval = 0.5  # seconds
 
     # Tell TX thread to begin
     if (tx_start != None):
@@ -382,6 +389,39 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
             # Write to file
             outfile.write(buf[:num * bytes_per_sample])
 
+            """"
+
+            arxizouyn ta organa edw!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+            """
+
+            # ---- 👇 Convert buffer to complex samples ----
+            data = np.frombuffer(buf[:num * bytes_per_sample], dtype=np.int16)
+            iq = data[::2] + 1j * data[1::2]
+
+            # ---- 👇 Update FFT buffer as ring buffer ----
+            fft_buffer = np.roll(fft_buffer, -len(iq))
+            fft_buffer[-len(iq):] = iq
+
+            # ---- 👇 Plot FFT every plot_interval seconds ----
+            if time.time() - last_fft_plot > plot_interval:
+                last_fft_plot = time.time()
+
+                # Compute FFT
+                fft_vals = np.fft.fftshift(np.fft.fft(fft_buffer))
+                fft_db = 20 * np.log10(np.abs(fft_vals) + 1e-6)
+
+                # Frequency axis
+                freqs = np.fft.fftshift(np.fft.fftfreq(len(fft_buffer), 1 / rate))
+
+                # Plot
+                plt.clf()
+                plt.plot(freqs / 1e6, fft_db)
+                plt.xlabel('Frequency (MHz)')
+                plt.ylabel('Magnitude (dB)')
+                plt.title('Real-Time FFT')
+                plt.pause(0.001)
+
     # Disable module
     print("RX: Stop")
     ch.enable = False
@@ -397,7 +437,6 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 # =============================================================================
 # Load Configuration
 # =============================================================================
-
 
 
 # Set libbladeRF verbosity level
@@ -459,62 +498,15 @@ tx_pool = ThreadPool(processes=1)
 
 loops = 0
 
-
 import threading
 
-def run_rx():
-    # Your BladeRF receiving logic here
+
+# def run_rx():
+#     # Your BladeRF receiving logic here
     # Continuously write samples to the .bin file
-    loops = 0
-    while True:
-        time.sleep(6)
-        loops += 1
-        if (loops > 100):
-            break
-
-        print("got into RX loop")
-
-        rx_ch = _bladerf.CHANNEL_RX(config.getint(s, 'rx_channel'))
-        rx_freq = int(config.getfloat(s, 'rx_frequency'))
-        rx_rate = int(config.getfloat(s, 'rx_samplerate'))
-        rx_gain = int(config.getfloat(s, 'rx_gain'))
-        rx_ns = int(config.getfloat(s, 'rx_num_samples'))
-        rx_file = config.get(s, 'rx_file')
-
-        fft_size = N_SAMPLES
-
-        print(rx_freq)
-
-        # Make this blocking for now ...
-        status = rx_pool.apply_async(receive,
-                                     (),
-                                     {'device': b,
-                                      'channel': rx_ch,
-                                      'freq': rx_freq,
-                                      'rate': rx_rate,
-                                      'gain': rx_gain,
-                                      'tx_start': None,
-                                      'rx_done': None,
-                                      'rxfile': rx_file,
-                                      'num_samples': rx_ns
-                                      }).get()
 
 
-        #TODO append to rx data buffer
-        #TODO check if rx buffer is full
-        # TODO check if main file is full
-
-        if (status < 0):
-            print("Receive operation failed with error " + str(status))
-
-            """
-                                The return value of status is given by calling the transmit def, which always returns
-                                an integer. Thus, simply referencing transmit as an argument of tx_pool.apply_async()
-                                "activates" the transmit def, which shall return an integer.
-
-                                !!!!!!!!!!!
-            """
-
+loops = 0
 for s in [ss for ss in config.sections() if board_name + '-' in ss]:
 
     if (s == board_name + "-load-fpga"):
@@ -528,20 +520,65 @@ for s in [ss for ss in config.sections() if board_name + '-' in ss]:
 
         print("RUNNING")
 
-
         if (s == board_name + '-rx'):
             # rx_main()
             # Start RX in a separate thread
-            rx_thread = threading.Thread(target=run_rx)
-            rx_thread.daemon = True
-            rx_thread.start()
-            # QtWidgets.QApplication.instance().exec()
-            # app.exec()
-            # app.exec()
-            app = QtWidgets.QApplication(sys.argv)
-            window = RealTimeFFTPlot(file_path)
-            window.show()
-            sys.exit(app.exec_())
+
+
+            # rx_thread = threading.Thread(target=run_rx)
+            # rx_thread.daemon = True
+            # rx_thread.start()
+            print("\nhegfdhjfwaegfawe")
+            while True:
+                # time.sleep(6)
+                loops += 1
+                if (loops > 100):
+                    break
+
+                print("got into RX loop")
+
+                rx_ch = _bladerf.CHANNEL_RX(config.getint(s, 'rx_channel'))
+                # rx_ch = 0
+                rx_freq = int(config.getfloat(s, 'rx_frequency'))
+                rx_rate = int(config.getfloat(s, 'rx_samplerate'))
+                rx_gain = int(config.getfloat(s, 'rx_gain'))
+                rx_ns = int(config.getfloat(s, 'rx_num_samples'))
+                rx_file = config.get(s, 'rx_file')
+
+                fft_size = N_SAMPLES
+
+                print(rx_freq)
+
+                # Make this blocking for now ...
+                status = rx_pool.apply_async(receive,
+                                             (),
+                                             {'device': b,
+                                              'channel': rx_ch,
+                                              'freq': rx_freq,
+                                              'rate': rx_rate,
+                                              'gain': rx_gain,
+                                              'tx_start': None,
+                                              'rx_done': None,
+                                              'rxfile': rx_file,
+                                              'num_samples': rx_ns
+                                              }).get()
+
+                # TODO append to rx data buffer
+                # TODO check if rx buffer is full
+                # TODO check if main file is full
+
+                if (status < 0):
+                    print("Receive operation failed with error " + str(status))
+
+                    """
+                                        The return value of status is given by calling the transmit def, which always returns
+                                        an integer. Thus, simply referencing transmit as an argument of tx_pool.apply_async()
+                                        "activates" the transmit def, which shall return an integer.
+
+                                        !!!!!!!!!!!
+                    """
+
+
 
 
 
