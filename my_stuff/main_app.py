@@ -54,6 +54,18 @@ import pyqtgraph as pg
 # app.exec_()
 
 
+prev_fft_db = None
+alpha = 0.2  # Smoothing factor, adjust as needed
+# The smoothing factor controls how much the new FFT data affects the plot.
+# 	•	If alpha = 1.0: you show only the new FFT (no smoothing).
+# 	•	If alpha = 0.0: you show only the old plot (fully frozen).
+# 	•	If alpha = 0.2: you blend 20% of the new FFT with 80% of the previous plot.
+#
+# It reduces flickering by slowing down how fast the display reacts to small changes.
+
+
+
+TARGET_FFT_SIZE = 8192*4  # or 4096 for faster updates
 
 
 # =============================================================================
@@ -146,12 +158,13 @@ def load_fpga(device, image):
 # Global buffer and lock for thread-safe access
 import threading
 
-shared_buffer = np.zeros(1024, dtype=np.complex64)  # or your actual size
+shared_buffer = np.zeros(TARGET_FFT_SIZE, dtype=np.complex64)  # or your actual size
 buffer_lock = threading.Lock()
 
 
 
 def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
+    global prev_fft_db
     """
     Extracts FFT from buffer and updates the plot.
 
@@ -163,12 +176,34 @@ def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
     """
     # TODO clear buffer after plot
 
+
     if np.any(buffer):  # Skip empty buffer
-        fft_vals = np.fft.fftshift(np.fft.fft(buffer))
-        fft_db = 20 * np.log10(np.abs(fft_vals) + 1e-6)
+        buffer = buffer - np.mean(buffer)
+        window = np.hanning(len(buffer))  # Or np.blackman, np.hamming, etc.
+        buffer_windowed = buffer * window
+        buffer_windowed = buffer_windowed - np.mean(buffer_windowed) # Remove DC offset (optional but useful)
+
+
+        # Normalize window to preserve signal power
+        normalization_factor = np.sum(window) / len(window)
+        fft_vals = np.fft.fftshift(np.fft.fft(buffer_windowed))
+        fft_vals = fft_vals / (len(buffer) * normalization_factor)  # Normalize properly
+
+        # Convert to dB scale
+        fft_db = 20 * np.log10(np.abs(fft_vals) + 1e-12)
         freqs = np.fft.fftshift(np.fft.fftfreq(len(buffer), 1 / sample_rate))
         freqs_mhz = (freqs + center_freq_hz) / 1e6  # Convert to MHz
-        curve.setData(freqs_mhz, fft_db)
+
+
+        if prev_fft_db is None:
+            smoothed_fft_db = fft_db
+        else:
+            smoothed_fft_db = alpha * fft_db + (1 - alpha) * prev_fft_db
+
+        prev_fft_db = smoothed_fft_db
+        curve.setData(freqs_mhz, smoothed_fft_db)
+
+
 
 
 
@@ -210,12 +245,12 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
                        stream_timeout=3500)
 
     # Enable module
-    print("RX: Start")
+    # print("RX: Start")
     ch.enable = True
 
     # Create receive buffer
     bytes_per_sample = 4
-    buf = bytearray(1024 * bytes_per_sample)
+    buf = bytearray(num_samples * bytes_per_sample)
     num_samples_read = 0
 
     # Tell TX thread to begin
@@ -247,13 +282,20 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
             # Converts the interleaved real (I) and imaginary (Q) parts of the signal into a complex number array (I + jQ).
             iq = data[::2] + 1j * data[1::2]
 
+            # Downsample the data for real-time plotting (e.g., take 1 out of every 500 samples)
+            # Adjust step based on how many you want to show — aim for 4K or 8K points max
+
+            step = max(len(iq) // TARGET_FFT_SIZE, 1)
+            iq_downsampled = iq[::step]
+
+
             # Update shared_buffer safely
             with buffer_lock:
                 # Updates shared_buffer with the new complex samples (I/Q), ensuring the buffer size does not exceed its allocated length.
-                shared_buffer[:len(iq)] = iq[:len(shared_buffer)]
+                shared_buffer[:len(iq_downsampled)] = iq_downsampled[:len(shared_buffer)]
 
     # Disable module
-    print("RX: Stop")
+    # print("RX: Stop")
     ch.enable = False
 
     if (rx_done != None):
