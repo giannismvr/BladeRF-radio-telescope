@@ -161,6 +161,8 @@ def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
         sample_rate (float): Sample rate in Hz.
         center_freq_hz (float): Center frequency in Hz.
     """
+    # TODO clear buffer after plot
+
     if np.any(buffer):  # Skip empty buffer
         fft_vals = np.fft.fftshift(np.fft.fft(buffer))
         fft_db = 20 * np.log10(np.abs(fft_vals) + 1e-6)
@@ -169,43 +171,14 @@ def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
         curve.setData(freqs_mhz, fft_db)
 
 
-def fft_plot_worker():
-    #TODO clear buffer after plot
-
-    global shared_buffer, buffer_lock, fft_curve, fs, rx_freq
-    prev_fft_db = None
-    while True:
-        with buffer_lock:
-            data = shared_buffer.copy()
-
-        if np.any(data):  # Skip, if buffer is all zeros
-            # Compute FFT
-            fft_vals = np.fft.fftshift(np.fft.fft(data))
-            fft_db = 20 * np.log10(np.abs(fft_vals) + 1e-6)
-
-
-            # Only update the plot if the data has changed
-
-            # if prev_fft_db is None or not np.allclose(fft_db, prev_fft_db):
-            # Center frequencies around rx_frequency
-            freqs = np.fft.fftshift(np.fft.fftfreq(len(data), 1 / fs))
-            freqs_mhz = (freqs + rx_freq) / 1e6  # in MHz
-
-            # Update the plot with new data
-            fft_curve.setData(freqs_mhz, fft_db)
-            prev_fft_db = fft_db  # Update the previous FFT data to the current one
-
-
-        time.sleep(0.1)  # adjust to control update rate
-
-
-
 
 def update_fft_gui():
     global shared_buffer, buffer_lock, fft_curve, fs, rx_freq
     with buffer_lock:
         data = shared_buffer.copy()
     compute_and_plot_fft(data, fft_curve, fs, rx_freq)
+
+    # TODO clear buffer after plot
 
 def receive(device, channel: int, freq: int, rate: int, gain: int,
             tx_start=None, rx_done=None,
@@ -357,8 +330,8 @@ tx_pool = ThreadPool(processes=1)
 
 
 
-#TODO append to rx data buffer
-#TODO check if rx buffer is full
+# TODO append to rx data buffer
+# TODO check if rx buffer is full
 # TODO check if main file is full
 
 
@@ -388,7 +361,7 @@ def rx_loop():
         if status < 0:
             print(f"Receive operation failed with error {status}")
             break
-        time.sleep(0.1)
+        time.sleep(0.05)
 
 
 if __name__ == "__main__":
@@ -419,7 +392,7 @@ if __name__ == "__main__":
     # Set up timer to refresh GUI
     timer = QtCore.QTimer()
     timer.timeout.connect(update_fft_gui)  # <- Connect to your function
-    timer.start(100)  # Refresh every 100ms
+    timer.start(50)  # Refresh every 50ms
 
     # Start RX thread
     rx_thread = threading.Thread(target=rx_loop, daemon=True)
