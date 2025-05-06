@@ -150,6 +150,25 @@ shared_buffer = np.zeros(1024, dtype=np.complex64)  # or your actual size
 buffer_lock = threading.Lock()
 
 
+
+def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
+    """
+    Extracts FFT from buffer and updates the plot.
+
+    Args:
+        buffer (np.array): Complex I/Q samples.
+        curve (pyqtgraph.PlotCurveItem): The curve to update.
+        sample_rate (float): Sample rate in Hz.
+        center_freq_hz (float): Center frequency in Hz.
+    """
+    if np.any(buffer):  # Skip empty buffer
+        fft_vals = np.fft.fftshift(np.fft.fft(buffer))
+        fft_db = 20 * np.log10(np.abs(fft_vals) + 1e-6)
+        freqs = np.fft.fftshift(np.fft.fftfreq(len(buffer), 1 / sample_rate))
+        freqs_mhz = (freqs + center_freq_hz) / 1e6  # Convert to MHz
+        curve.setData(freqs_mhz, fft_db)
+
+
 def fft_plot_worker():
     #TODO clear buffer after plot
 
@@ -167,33 +186,26 @@ def fft_plot_worker():
 
             # Only update the plot if the data has changed
 
-            if prev_fft_db is None or not np.allclose(fft_db, prev_fft_db):
-                # Center frequencies around rx_frequency
-                freqs = np.fft.fftshift(np.fft.fftfreq(len(data), 1 / fs))
-                freqs_mhz = (freqs + rx_freq) / 1e6  # in MHz
+            # if prev_fft_db is None or not np.allclose(fft_db, prev_fft_db):
+            # Center frequencies around rx_frequency
+            freqs = np.fft.fftshift(np.fft.fftfreq(len(data), 1 / fs))
+            freqs_mhz = (freqs + rx_freq) / 1e6  # in MHz
 
-                # Update the plot with new data
-                fft_curve.setData(freqs_mhz, fft_db)
-                prev_fft_db = fft_db  # Update the previous FFT data to the current one
+            # Update the plot with new data
+            fft_curve.setData(freqs_mhz, fft_db)
+            prev_fft_db = fft_db  # Update the previous FFT data to the current one
 
-        time.sleep(0.5)  # adjust to control update rate
+
+        time.sleep(0.1)  # adjust to control update rate
 
 
 
 
 def update_fft_gui():
-    global fft_curve, shared_buffer, buffer_lock
-
+    global shared_buffer, buffer_lock, fft_curve, fs, rx_freq
     with buffer_lock:
-        fft_data = shared_buffer.copy()
-
-    if np.any(fft_data):  # Only update if buffer has real data
-        fft_vals = np.fft.fftshift(np.fft.fft(fft_data))
-        fft_db = 20 * np.log10(np.abs(fft_vals) + 1e-6)
-        freqs = np.fft.fftshift(np.fft.fftfreq(len(fft_data), 1 / fs))
-        fft_curve.setData(freqs / 1e6, fft_db)  # MHz
-
-
+        data = shared_buffer.copy()
+    compute_and_plot_fft(data, fft_curve, fs, rx_freq)
 
 def receive(device, channel: int, freq: int, rate: int, gain: int,
             tx_start=None, rx_done=None,
@@ -379,9 +391,8 @@ def rx_loop():
         time.sleep(0.1)
 
 
-
 if __name__ == "__main__":
-    #TODO start the GUI
+    # TODO start the GUI
 
     app = QtWidgets.QApplication(sys.argv)
 
@@ -408,31 +419,28 @@ if __name__ == "__main__":
     # Set up timer to refresh GUI
     timer = QtCore.QTimer()
     timer.timeout.connect(update_fft_gui)  # <- Connect to your function
-    timer.start(200)  # Refresh every 200ms
-
-
+    timer.start(100)  # Refresh every 100ms
 
     # Start RX thread
     rx_thread = threading.Thread(target=rx_loop, daemon=True)
     rx_thread.start()
 
-    #TODO start threads!!!!
+    # TODO start threads!!!!
+    # ✔️ Only rx_thread and QTimer are needed now — fft_plot_worker is no longer used
 
-    # Start the worker thread
-    worker_thread = threading.Thread(target=fft_plot_worker)
-    worker_thread.daemon = True  # Optional: Daemon thread will exit when the main program exits
-    worker_thread.start()
+    # ❌ Removed: fft_plot_worker thread
+    # The GUI update via QTimer now handles FFT computation and plotting safely
 
     # Start GUI loop (this must stay in the main thread!)
     sys.exit(app.exec_())
-        # if status < 0:
-        #     print(f"Receive operation failed with error {status}")
-        #     break  # Exit loop if receive failed
 
-            # Refresh the GUI by updating the plot
-            # Since GUI updates must happen in the main thread, we invoke the method
-            # that updates the plo
+    # if status < 0:
+    #     print(f"Receive operation failed with error {status}")
+    #     break  # Exit loop if receive failed
 
+    # Refresh the GUI by updating the plot
+    # Since GUI updates must happen in the main thread, we invoke the method
+    # that updates the plot
 """
     The return value of status is given by calling the transmit def, which always returns
     an integer. Thus, simply referencing transmit as an argument of tx_pool.apply_async()
