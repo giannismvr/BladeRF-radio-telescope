@@ -6,9 +6,11 @@
 # Review the companion my_configuration.ini to adjust configuration options.
 #
 ###############################################################################
+
+from datetime import datetime
 from multiprocessing.pool import ThreadPool
 from configparser import ConfigParser
-
+import pyqtgraph as pg
 from bladerf import _bladerf
 import time
 import queue
@@ -19,6 +21,17 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 
+
+current_datetime = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')  # Format: "YYYY-MM-DD_HH-MM-SS"
+bw_file_path = f"./bw_summing_data_{current_datetime}.bin"
+stacked_file_path = f"./exposure_stacking_data_{current_datetime}.bin"
+
+# Bandwidth summing queue (optional) and stacking memory
+bw_powers = []         # All power measurements
+stacked_powers = []    # Sliding window or average of power
+
+POWER_WINDOW = 100     # Number of points to retain in stacked plot
+power_times = []       # Timestamps of each power measure (for x-axis)
 
 # Load configuration
 config = ConfigParser()
@@ -148,6 +161,62 @@ def load_fpga(device, image):
 
 
 
+def update_bw_plots():
+    global bw_powers, stacked_powers, power_times
+
+    if not bw_powers:
+        return
+
+    # 1) Convert to dB
+    powers_db = 10 * np.log10(np.array(bw_powers) + 1e-12)
+    times_all = np.array(power_times)
+
+    # 2) Convert time to relative time in seconds (or milliseconds if needed)
+    times_relative = times_all - times_all[0]  # Time in seconds since the first sample
+    # For milliseconds: times_relative = (times_all - times_all[0]) * 1000
+
+    # 3) Trim both to the last POWER_WINDOW samples
+    if len(powers_db) > POWER_WINDOW:
+        powers_db = powers_db[-POWER_WINDOW:]
+        times_relative = times_relative[-POWER_WINDOW:]
+
+    # 4) Plot raw data
+    bw_curve.setData(times_relative, powers_db)
+
+    # 5) Save Bandwidth Summing Data to file
+    with open(bw_file_path, 'ab') as bw_file:
+        np.array([times_relative, powers_db], dtype=np.float64).tofile(bw_file)
+
+    # 6) If you have at least as many points as your moving-average window:
+    window = 10
+    if len(powers_db) >= window:
+        kernel = np.ones(window) / window
+        stacked_db = np.convolve(powers_db, kernel, mode='valid')
+        times_stacked = times_relative[window - 1:]  # Adjust times for stacked plot
+    else:
+        stacked_db = np.array([])
+        times_stacked = np.array([])
+
+    # 7) Plot the exposure-stacked curve
+    stacked_curve.setData(times_stacked, stacked_db)
+
+    # 8) Save Exposure Stacking Data to file
+    with open(stacked_file_path, 'ab') as stacked_file:
+        np.array([times_stacked, stacked_db], dtype=np.float64).tofile(stacked_file)
+
+    # Dynamic Y-axis scaling for Bandwidth-Summed Plot
+    max_power = np.max(powers_db)
+    min_power = np.min(powers_db)
+    bw_plot.setYRange(min_power - 10, max_power + 10)  # Add some padding for clarity
+
+    # Dynamic Y-axis scaling for Stacked Power Plot
+    if len(stacked_db) > 0:
+        max_stacked = np.max(stacked_db)
+        min_stacked = np.min(stacked_db)
+        stacked_plot.setYRange(min_stacked - 10, max_stacked + 10)  # Add some padding for clarity
+
+
+
 
 # Global buffer and lock for thread-safe access
 import threading
@@ -193,13 +262,12 @@ def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
 
         freqs_mhz = (freqs + center_freq_hz) / 1e6  # Convert to MHz
 
-        print(freqs)
-        print(freqs_mhz)
+
         ## So that only the fc±BW/2 spectrum is shown
         bw_half_mhz = BW / 2 / 1e6  # Convert to MHz
         valid_indices = ((freqs_mhz >= (center_freq_hz / 1e6 - bw_half_mhz)) &
                          (freqs_mhz <= (center_freq_hz / 1e6 + bw_half_mhz)))
-        print(valid_indices)
+
 
         if prev_fft_db is None:
             smoothed_fft_db = fft_db
@@ -304,6 +372,19 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
             # Converts the interleaved real (I) and imaginary (Q) parts of the signal into a complex number array (I + jQ).
             iq = data[::2] + 1j * data[1::2]
+
+            # === Bandwidth Summing (raw full IQ) ===
+            power = np.sum(np.abs(iq) ** 2) / len(iq)
+            bw_powers.append(power)
+            power_times.append(time.time())
+
+            # Downsample for GUI only
+            step = max(len(iq) // TARGET_FFT_SIZE, 1)
+            iq_downsampled = iq[::step]
+
+            # Queue for FFT
+            with buffer_lock:
+                shared_buffer.put(iq_downsampled)
 
             # Downsample the data for real-time plotting (e.g., take 1 out of every 500 samples)
             # Adjust step based on how many you want to show — aim for 4K or 8K points max
@@ -410,7 +491,14 @@ def rx_loop():
         rx_rate = int(config.getfloat('bladerf2-rx', 'rx_samplerate'))
         rx_gain = int(config.getfloat('bladerf2-rx', 'rx_gain'))
         rx_ns = int(config.getfloat('bladerf2-rx', 'rx_num_samples'))
-        rx_file = config.get('bladerf2-rx', 'rx_file')
+        # rx_file = config.get('bladerf2-rx', 'rx_file')
+        rx_file_path = f'./aaanew_my_rx_samples_{current_datetime}.bin'
+
+        # Assign the new path to the config
+        config.set('bladerf2-rx', 'rx_file', rx_file_path)
+
+
+
 
         status = receive(
             device=b,
@@ -420,7 +508,7 @@ def rx_loop():
             gain=rx_gain,
             tx_start=None,
             rx_done=None,
-            rxfile=rx_file,
+            rxfile=rx_file_path,
             num_samples=rx_ns
         )
 
@@ -428,10 +516,15 @@ def rx_loop():
             print(f"Receive operation failed with error {status}")
             break
         time.sleep(0.05)
+        print(f"bw_powers: {bw_powers[-5:]}")  # Print last 5 entries
+        print(f"power_times: {power_times[-5:]}")
+
 
 
 if __name__ == "__main__":
     # TODO start the GUI
+
+
 
     app = QtWidgets.QApplication(sys.argv)
 
@@ -455,6 +548,26 @@ if __name__ == "__main__":
 
     fft_plot.setYRange(-100, 0, padding=0)  # dB range — adjust based on your signal
 
+    # Add Bandwidth-Summed Power Plot
+    win.nextRow()
+    bw_plot = win.addPlot(title="Bandwidth Summed Power (dB)")
+    bw_curve = bw_plot.plot(pen='y')
+    bw_plot.setLabel('bottom', 'Time (s)')
+    bw_plot.setLabel('left', 'Power (dB)')
+    bw_plot.setYRange(-100, 0)
+
+    # Add Exposure Stacked Power Plot
+    win.nextRow()
+    stacked_plot = win.addPlot(title="Exposure Stacked Power (dB avg)")
+    stacked_curve = stacked_plot.plot(pen='c')
+    stacked_plot.setLabel('bottom', 'Time (s)')
+    stacked_plot.setLabel('left', 'Smoothed Power (dB)')
+    stacked_plot.setYRange(-100, 0)
+
+    bw_timer = QtCore.QTimer()
+    bw_timer.timeout.connect(update_bw_plots)
+    bw_timer.start(50)  # Every 0.5 sec or as needed
+
     # Set up timer to refresh GUI
     timer = QtCore.QTimer()
     timer.timeout.connect(update_fft_gui)  # <- Connect to your function
@@ -463,6 +576,8 @@ if __name__ == "__main__":
     # Start RX thread
     rx_thread = threading.Thread(target=rx_loop, daemon=True)
     rx_thread.start()
+
+
 
     # TODO start threads!!!!
     # ✔️ Only rx_thread and QTimer are needed now — fft_plot_worker is no longer used

@@ -9,7 +9,7 @@ config.read('/Users/giannis/PycharmProjects/final_radiotelescope/my_stuff/my_con
 fs = float(config['bladerf2-rx']['rx_samplerate'])       # in Hz
 fc = float(config['bladerf2-rx']['rx_frequency'])        # in Hz
 bw = float(config['bladerf2-rx']['rx_bandwidth'])        # in Hz
-bin_path = '/Users/giannis/PycharmProjects/final_radiotelescope/my_stuff/aaanew_my_rx_samples.bin'
+bin_path = '/Users/giannis/PycharmProjects/final_radiotelescope/my_stuff/aaanew_my_rx_samples_2025-05-10_23-53-25.bin'
 
 # === Load binary file ===
 raw = np.fromfile(bin_path, dtype=np.int16)
