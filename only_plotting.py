@@ -4,20 +4,16 @@
 #
 # Basic example of using bladeRF Python bindings for full duplex TX/RX.
 # Review the companion my_configuration.ini to adjust configuration options.
-#
+
 ###############################################################################
 from multiprocessing.pool import ThreadPool
 from configparser import ConfigParser
 
 from bladerf import _bladerf
 import time
-import queue
+
 import os
 from configparser import ConfigParser
-import sys
-import numpy as np
-from PyQt5 import QtCore, QtWidgets
-import pyqtgraph as pg
 
 
 # Load configuration
@@ -30,6 +26,17 @@ N_SAMPLES = int(float(config['bladerf2-rx']['rx_num_samples']))
 BW = float(config['bladerf2-rx']['rx_bandwidth'])      # Hz
 rx_freq = float(config['bladerf2-rx']['rx_frequency']) # Hz
 fs = float(config['bladerf2-rx']['rx_samplerate'])     # Hz
+
+import sys
+import numpy as np
+from PyQt5 import QtCore, QtWidgets
+import pyqtgraph as pg
+
+import sys
+import numpy as np
+from PyQt5 import QtCore, QtWidgets
+import pyqtgraph as pg
+
 
 
 # TODO ignore this class
@@ -46,7 +53,7 @@ fs = float(config['bladerf2-rx']['rx_samplerate'])     # Hz
 
 
 prev_fft_db = None
-alpha = 0.5  # Smoothing factor, adjust as needed
+alpha = 1  # Smoothing factor, adjust as needed
 # The smoothing factor controls how much the new FFT data affects the plot.
 # 	•	If alpha = 1.0: you show only the new FFT (no smoothing).
 # 	•	If alpha = 0.0: you show only the old plot (fully frozen).
@@ -56,6 +63,7 @@ alpha = 0.5  # Smoothing factor, adjust as needed
 
 
 
+TARGET_FFT_SIZE = 8192*4  # or 4096 for faster updates
 
 
 # =============================================================================
@@ -145,15 +153,13 @@ def load_fpga(device, image):
 # =============================================================================
 # RECEIVE
 # =============================================================================
-
-
-
-
 # Global buffer and lock for thread-safe access
 import threading
-TARGET_FFT_SIZE = 8192*4  # or 4096 for faster updates
-shared_buffer = queue.Queue(maxsize=TARGET_FFT_SIZE)
+
+shared_buffer = np.zeros(TARGET_FFT_SIZE, dtype=np.complex64)  # or your actual size
 buffer_lock = threading.Lock()
+
+
 
 def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
     global prev_fft_db
@@ -170,10 +176,9 @@ def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
 
 
     if np.any(buffer):  # Skip empty buffer
-        buffer = buffer - np.mean(buffer)
-        window = np.hanning(len(buffer))  # Or np.blackman, np.hamming, etc.
-        buffer_windowed = buffer * window
-        buffer_windowed = buffer_windowed - np.mean(buffer_windowed) # Remove DC offset (optional but useful)
+        # buffer = buffer - np.mean(buffer)
+        window = np.hanning(len(buffer))
+        buffer_windowed = (buffer - np.mean(buffer)) * window
 
 
         # Normalize window to preserve signal power
@@ -183,23 +188,9 @@ def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
 
         # Convert to dB scale
         fft_db = 20 * np.log10(np.abs(fft_vals) + 1e-12)
-
-        #computes the frequency bins corresponding to the FFT of your signal buffer:
-        freqs = np.fft.fftshift(np.fft.fftfreq(len(buffer), 1 / sample_rate)) # (1 / sample_rate) == The time between samples, or sample period (T).
-        # np.fft.fftfreq: This returns an array of frequency bins in Hz: [0, 1, 2, ..., fs/2 - 1, -fs/2, ..., -1] ...
-        # ...spanning from 0 up to just below sample_rate, then wrapping around to negative frequencies.
-
-        #  np.fft.fftshift(...): Reorders the frequencies to center 0 Hz
-
+        freqs = np.fft.fftshift(np.fft.fftfreq(len(buffer), 1 / sample_rate))
         freqs_mhz = (freqs + center_freq_hz) / 1e6  # Convert to MHz
 
-        print(freqs)
-        print(freqs_mhz)
-        ## So that only the fc±BW/2 spectrum is shown
-        bw_half_mhz = BW / 2 / 1e6  # Convert to MHz
-        valid_indices = ((freqs_mhz >= (center_freq_hz / 1e6 - bw_half_mhz)) &
-                         (freqs_mhz <= (center_freq_hz / 1e6 + bw_half_mhz)))
-        print(valid_indices)
 
         if prev_fft_db is None:
             smoothed_fft_db = fft_db
@@ -207,8 +198,7 @@ def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
             smoothed_fft_db = alpha * fft_db + (1 - alpha) * prev_fft_db
 
         prev_fft_db = smoothed_fft_db
-        # curve.setData(freqs_mhz, smoothed_fft_db)
-        curve.setData(freqs_mhz[valid_indices], smoothed_fft_db[valid_indices])
+        curve.setData(freqs_mhz, smoothed_fft_db)
 
 
 
@@ -216,27 +206,11 @@ def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
 
 def update_fft_gui():
     global shared_buffer, buffer_lock, fft_curve, fs, rx_freq
-
-    # Initialize data to None to handle case where the queue is empty
-    data = None
-
-    try:
-        # Try to get data from the queue without blocking
-        data = shared_buffer.get_nowait()  # Non-blocking, get data
-    except queue.Empty:
-        pass  # If the queue is empty, just skip
-
-    if data is not None:
-        compute_and_plot_fft(data, fft_curve, fs, rx_freq)
-
-    # Optional: If you want to clear the queue after processing (to free memory), you can do this
-    # while not shared_buffer.empty():
-    #     shared_buffer.get()
+    with buffer_lock:
+        data = shared_buffer.copy()
+    compute_and_plot_fft(data, fft_curve, fs, rx_freq)
 
     # TODO clear buffer after plot
-
-
-
 
 def receive(device, channel: int, freq: int, rate: int, gain: int,
             tx_start=None, rx_done=None,
@@ -266,6 +240,8 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
                        buffer_size=8192,
                        num_transfers=8,
                        stream_timeout=3500)
+
+    # TODO: Initial Screen timeout was 3500 not 1500 !!!!!!!!!!!!!
 
     # Enable module
     # print("RX: Start")
@@ -297,7 +273,10 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
             num_samples_read += num
 
             # Write to file
-            outfile.write(buf[:num * bytes_per_sample])
+
+            #TODO - DONT write to dile when solely plotting
+
+            # outfile.write(buf[:num * bytes_per_sample])
 
             # converts the raw byte data in buf into 16-bit integers, representing the received signal samples (I/Q data).
             data = np.frombuffer(buf[:num * bytes_per_sample], dtype=np.int16)
@@ -307,6 +286,13 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
             # Downsample the data for real-time plotting (e.g., take 1 out of every 500 samples)
             # Adjust step based on how many you want to show — aim for 4K or 8K points max
+            # Optional: remove DC
+            iq -= np.mean(iq)
+
+            # Compute total band power (bandwidth summing)
+            band_power = np.sum(np.abs(iq) ** 2) / len(iq)  # Mean power in band
+
+            print(f"Band Power: {band_power:.2f}")
 
             step = max(len(iq) // TARGET_FFT_SIZE, 1)
             iq_downsampled = iq[::step]
@@ -315,8 +301,7 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
             # Update shared_buffer safely
             with buffer_lock:
                 # Updates shared_buffer with the new complex samples (I/Q), ensuring the buffer size does not exceed its allocated length.
-                # shared_buffer[:len(iq_downsampled)] = iq_downsampled[:len(shared_buffer)]
-                shared_buffer.put(iq_downsampled)  # This will add the data to the queue
+                shared_buffer[:len(iq_downsampled)] = iq_downsampled[:len(shared_buffer)]
 
     # Disable module
     # print("RX: Stop")
@@ -458,7 +443,7 @@ if __name__ == "__main__":
     # Set up timer to refresh GUI
     timer = QtCore.QTimer()
     timer.timeout.connect(update_fft_gui)  # <- Connect to your function
-    timer.start(50)  # Refresh every 50ms
+    timer.start(5)  # Refresh every 5ms
 
     # Start RX thread
     rx_thread = threading.Thread(target=rx_loop, daemon=True)

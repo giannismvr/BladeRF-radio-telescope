@@ -14,11 +14,9 @@ import time
 import queue
 import os
 from configparser import ConfigParser
-import sys
-import numpy as np
-from PyQt5 import QtCore, QtWidgets
-import pyqtgraph as pg
 
+# Path to your binary file
+file_path = "/Users/giannis/PycharmProjects/final_radiotelescope/my_stuff/my_rx_samples.bin"
 
 # Load configuration
 config = ConfigParser()
@@ -30,6 +28,17 @@ N_SAMPLES = int(float(config['bladerf2-rx']['rx_num_samples']))
 BW = float(config['bladerf2-rx']['rx_bandwidth'])      # Hz
 rx_freq = float(config['bladerf2-rx']['rx_frequency']) # Hz
 fs = float(config['bladerf2-rx']['rx_samplerate'])     # Hz
+
+import sys
+import numpy as np
+from PyQt5 import QtCore, QtWidgets
+import pyqtgraph as pg
+
+import sys
+import numpy as np
+from PyQt5 import QtCore, QtWidgets
+import pyqtgraph as pg
+
 
 
 # TODO ignore this class
@@ -46,7 +55,7 @@ fs = float(config['bladerf2-rx']['rx_samplerate'])     # Hz
 
 
 prev_fft_db = None
-alpha = 0.5  # Smoothing factor, adjust as needed
+alpha = 1  # Smoothing factor, adjust as needed
 # The smoothing factor controls how much the new FFT data affects the plot.
 # 	•	If alpha = 1.0: you show only the new FFT (no smoothing).
 # 	•	If alpha = 0.0: you show only the old plot (fully frozen).
@@ -216,6 +225,7 @@ def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
 
 def update_fft_gui():
     global shared_buffer, buffer_lock, fft_curve, fs, rx_freq
+    global shared_buffer, buffer_lock, fft_curve, fs, rx_freq
 
     # Initialize data to None to handle case where the queue is empty
     data = None
@@ -230,8 +240,8 @@ def update_fft_gui():
         compute_and_plot_fft(data, fft_curve, fs, rx_freq)
 
     # Optional: If you want to clear the queue after processing (to free memory), you can do this
-    # while not shared_buffer.empty():
-    #     shared_buffer.get()
+    while not shared_buffer.empty():
+        shared_buffer.get()
 
     # TODO clear buffer after plot
 
