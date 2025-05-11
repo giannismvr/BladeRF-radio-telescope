@@ -24,11 +24,15 @@ import pyqtgraph as pg
 
 current_datetime = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')  # Format: "YYYY-MM-DD_HH-MM-SS"
 bw_file_path = f"./logs/bw_summing_data_{current_datetime}.bin"
-stacked_file_path = f"./exposure_stacking_data_{current_datetime}.bin"
+stacked_file_path = f"./logs/exposure_stacking_data_{current_datetime}.bin"
 
 # Bandwidth summing queue (optional) and stacking memory
 bw_powers = []         # All power measurements
 stacked_powers = []    # Sliding window or average of power
+
+
+# Defines BW for bw summing
+BW_FOR_BW_SUMMING = 2e6  # for example, 2 MHz
 
 POWER_WINDOW = 100     # Number of points to retain in stacked plot
 power_times = []       # Timestamps of each power measure (for x-axis)
@@ -170,6 +174,9 @@ def update_bw_plots():
     # 1) Convert to dB
     powers_db = 10 * np.log10(np.array(bw_powers) + 1e-12)
     times_all = np.array(power_times)
+    # print(len(bw_powers))
+    # print(bw_powers)
+    # print("BW powers list:", bw_powers[::int(len(bw_powers) / 10)])
 
     # 2) Convert time to relative time in seconds (or milliseconds if needed)
     times_relative = times_all - times_all[0]  # Time in seconds since the first sample
@@ -270,14 +277,21 @@ def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
                          (freqs_mhz <= (center_freq_hz / 1e6 + bw_half_mhz)))
 
 
-        if prev_fft_db is None:
-            smoothed_fft_db = fft_db
+        # if prev_fft_db is None:
+        #     smoothed_fft_db = fft_db
+        # else:
+        #     smoothed_fft_db = alpha * fft_db + (1 - alpha) * prev_fft_db
+        #
+        # prev_fft_db = smoothed_fft_db
+        # # curve.setData(freqs_mhz, smoothed_fft_db)
+        # curve.setData(freqs_mhz[valid_indices], smoothed_fft_db[valid_indices])
+        if prev_fft_db is None or len(prev_fft_db) != len(fft_db[valid_indices]):
+            smoothed_fft_db = fft_db[valid_indices]
         else:
-            smoothed_fft_db = alpha * fft_db + (1 - alpha) * prev_fft_db
+            smoothed_fft_db = alpha * fft_db[valid_indices] + (1 - alpha) * prev_fft_db
 
         prev_fft_db = smoothed_fft_db
-        # curve.setData(freqs_mhz, smoothed_fft_db)
-        curve.setData(freqs_mhz[valid_indices], smoothed_fft_db[valid_indices])
+        curve.setData(freqs_mhz[valid_indices], smoothed_fft_db)
 
 
 
@@ -332,9 +346,12 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
     device.sync_config(layout=_bladerf.ChannelLayout.RX_X1,
                        fmt=_bladerf.Format.SC16_Q11,
                        num_buffers=16,
-                       buffer_size=8192,
+                       buffer_size=8192, #samples per buffer
                        num_transfers=8,
                        stream_timeout=3500)
+
+    # buffer_size: How many samples per buffer (not bytes!) !!!!!!!!!!!!!!!!!!!!!!!!
+    # buffer_size is the actual number of samples each buffer contains — not just a limit, but the exact size you’ll get per transfer.
 
     # Enable module
     # print("RX: Start")
@@ -342,31 +359,42 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
     # Create receive buffer
     bytes_per_sample = 4
-    buf = bytearray(num_samples * bytes_per_sample)
+    # TODO: Replace num_samples with 1024 or some shit - I did!!!
+
+    num_samples_per_buffer = 8192
+
+    buf = bytearray(num_samples_per_buffer * bytes_per_sample)
     num_samples_read = 0
+
+    # print("len of buffer:", len(buf))
+
 
     # Tell TX thread to begin
     if (tx_start != None):
         tx_start.set()
 
     # Save the samples
-    with open(rxfile, 'wb') as outfile:
+    with open(rxfile, 'ab') as outfile:
         while True:
             if num_samples > 0 and num_samples_read == num_samples:
                 break
             elif num_samples > 0:
+                # print(len(buf))
                 num = min(len(buf) // bytes_per_sample,
                           num_samples - num_samples_read)
             else:
+                print("What?", num_samples)
                 num = len(buf) // bytes_per_sample
 
-            # This reads num samples from the receiver (BladeRF) into the buf buffer.
+            # This receives {num} samples and stores them into the buf
             device.sync_rx(buf, num)
+
             # This keeps track of how many samples have been read so far.
             num_samples_read += num
 
-            # Write to file
+            # Write to file main "all-inclusive" I-Q data file
             outfile.write(buf[:num * bytes_per_sample])
+            # buf[:num * bytes_per_sample]: a slice of the buffer that includes only the valid portion (i.e. just the bytes that were filled with new data).
 
             # converts the raw byte data in buf into 16-bit integers, representing the received signal samples (I/Q data).
             data = np.frombuffer(buf[:num * bytes_per_sample], dtype=np.int16)
@@ -374,11 +402,36 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
             # Converts the interleaved real (I) and imaginary (Q) parts of the signal into a complex number array (I + jQ).
             iq = data[::2] + 1j * data[1::2]
 
-            print(iq)
+            # print(iq)
 
             # === Bandwidth Summing (raw full IQ) ===
-            power = np.sum(np.abs(iq) ** 2) / len(iq)
-            bw_powers.append(power)
+            # print("LEN IQ:", len(iq)) #ALWAYS 100K right now
+
+            # power = np.sum(np.abs(iq) ** 2) / len(iq)
+            # print("power_current:", power)
+            # bw_powers.append(power)
+
+            # FFT-based BW Summing over BW_FOR_BW_SUMMING
+            window = np.hanning(len(iq))
+            iq_windowed = iq * window
+            norm_factor = np.sum(window) / len(window)
+
+            fft_vals = np.fft.fftshift(np.fft.fft(iq_windowed))
+            fft_vals /= (len(iq) * norm_factor)
+            power_spectrum = np.abs(fft_vals) ** 2
+
+            # Frequency axis in Hz
+            freqs = np.fft.fftshift(np.fft.fftfreq(len(iq), 1 / fs))
+            freqs_abs = freqs + freq  # shift to absolute center freq
+
+            # Find indices within ±BW_FOR_BW_SUMMING/2 around fc
+            half_bw = BW_FOR_BW_SUMMING / 2
+            valid_indices = np.where((freqs_abs >= freq - half_bw) & (freqs_abs <= freq + half_bw))[0]
+
+            # Band power in that range
+            band_power = np.sum(power_spectrum[valid_indices])
+            bw_powers.append(band_power)
+
             power_times.append(time.time())
 
             # Downsample for GUI only (e.g., take 1 out of every 500 samples)
@@ -485,7 +538,7 @@ def rx_loop():
         rx_gain = int(config.getfloat('bladerf2-rx', 'rx_gain'))
         rx_ns = int(config.getfloat('bladerf2-rx', 'rx_num_samples'))
         # rx_file = config.get('bladerf2-rx', 'rx_file')
-        rx_file_path = f'./aaanew_my_rx_samples_{current_datetime}.bin'
+        rx_file_path = f'./logs/all_inclusive_{current_datetime}.bin'
 
         # Assign the new path to the config
         config.set('bladerf2-rx', 'rx_file', rx_file_path)
@@ -509,8 +562,8 @@ def rx_loop():
             print(f"Receive operation failed with error {status}")
             break
         time.sleep(0.05)
-        print(f"bw_powers: {bw_powers[-5:]}")  # Print last 5 entries
-        print(f"power_times: {power_times[-5:]}")
+        # print(f"bw_powers: {bw_powers[-5:]}")  # Print last 5 entries
+        # print(f"power_times: {power_times[-5:]}")
 
 
 
@@ -575,19 +628,9 @@ if __name__ == "__main__":
     # TODO start threads!!!!
     # ✔️ Only rx_thread and QTimer are needed now — fft_plot_worker is no longer used
 
-    # ❌ Removed: fft_plot_worker thread
-    # The GUI update via QTimer now handles FFT computation and plotting safely
-
     # Start GUI loop (this must stay in the main thread!)
     sys.exit(app.exec_())
 
-    # if status < 0:
-    #     print(f"Receive operation failed with error {status}")
-    #     break  # Exit loop if receive failed
-
-    # Refresh the GUI by updating the plot
-    # Since GUI updates must happen in the main thread, we invoke the method
-    # that updates the plot
 """
     The return value of status is given by calling the transmit def, which always returns
     an integer. Thus, simply referencing transmit as an argument of tx_pool.apply_async()
