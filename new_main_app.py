@@ -10,7 +10,6 @@
 from datetime import datetime
 from multiprocessing.pool import ThreadPool
 from configparser import ConfigParser
-import pyqtgraph as pg
 from bladerf import _bladerf
 import time
 import queue
@@ -20,6 +19,7 @@ import sys
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
+from collections import deque
 
 
 current_datetime = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')  # Format: "YYYY-MM-DD_HH-MM-SS"
@@ -229,7 +229,10 @@ def update_bw_plots():
 # Global buffer and lock for thread-safe access
 import threading
 TARGET_FFT_SIZE = 8192*4  # or 4096 for faster updates
-shared_buffer = queue.Queue(maxsize=TARGET_FFT_SIZE)
+# this makes room for TARGET_FFT_SIZE buffers, not samples, in the queue....!!!!!! so i replaced it....
+# shared_buffer = queue.Queue(maxsize=TARGET_FFT_SIZE)
+# Keep only the 10 most recent FFT buffers
+shared_buffer = deque(maxlen=10)
 buffer_lock = threading.Lock()
 
 def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
@@ -303,20 +306,28 @@ def update_fft_gui():
     # Initialize data to None to handle case where the queue is empty
     data = None
 
-    try:
-        # Try to get data from the queue without blocking
-        data = shared_buffer.get_nowait()  # Non-blocking, get data
-    except queue.Empty:
-        pass  # If the queue is empty, just skip
+    # try:
+    #     # Try to get data from the queue without blocking
+    #     data = shared_buffer.get_nowait()  # Non-blocking, get data
+    # except queue.Empty:
+    #     pass  # If the queue is empty, just skip
+    with buffer_lock:
+        if len(shared_buffer) == 0:
+            return
+        # Get the most recent buffer (or whatever logic you prefer)
+        data = shared_buffer[-1]
 
     if data is not None:
         compute_and_plot_fft(data, fft_curve, fs, rx_freq)
+
+
 
     # Optional: If you want to clear the queue after processing (to free memory), you can do this
     # while not shared_buffer.empty():
     #     shared_buffer.get()
 
-    # TODO clear buffer after plot
+    # TODO clear buffer after plot- i think its done properly here:
+
 
 
 
@@ -342,6 +353,14 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
     ch.sample_rate = rate
     ch.gain = gain
 
+
+    #Actual gain I am getting - no matter what.
+    #Doesn't matter if I set it to 1000000db
+    #For manual gain control the range is from -15db to 60db
+    #if i set it to 1000db via the my_config.ini file, it will getv clamped to 60db
+    #and this print below shows exactly that:
+    print("Actual gain I am applying - (no matter what i put in the .ini file):", ch.gain)
+
     # Setup synchronous stream
     device.sync_config(layout=_bladerf.ChannelLayout.RX_X1,
                        fmt=_bladerf.Format.SC16_Q11,
@@ -356,6 +375,14 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
     # Enable module
     # print("RX: Start")
     ch.enable = True
+
+    print("gain_modes:", ch.gain_modes)
+    print("RX gain:", int(config.getfloat('bladerf2-rx', 'rx_gain')))
+    print("CH0: manual gain range:", b.get_gain_range(_bladerf.CHANNEL_RX(0)))  # ch 0 or 1
+    print("CH1: manual gain range:", b.get_gain_range(_bladerf.CHANNEL_RX(1)))  # ch 0 or 1
+
+    # print(b.get_gain_range(_bladerf.CHANNEL_RX(0)))
+
 
     # Create receive buffer
     bytes_per_sample = 4
@@ -383,7 +410,7 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
                 num = min(len(buf) // bytes_per_sample,
                           num_samples - num_samples_read)
             else:
-                print("What?", num_samples)
+                print("What? Num_samples < 0 ????? how can that happen?? Num_samples is: ", num_samples)
                 num = len(buf) // bytes_per_sample
 
             # This receives {num} samples and stores them into the buf
@@ -407,7 +434,7 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
             test_var = iq_test[0:num]
 
-            print("Wxxx:", np.max(test_var)) # TODO: If this is close to 1, you are overloading the ADC, and should reduce the gain
+            # print("Wxxx:", np.max(test_var)) # TODO: If this is close to 1, you are overloading the ADC, and should reduce the gain
             #TODO:  you will want to adjust your gain to try to get that value around 0.5 to 0.8.
             #TODO: If it is 0.999 that means your receiver is overloaded/saturated and the signal is going to be distorted (it will look smeared throughout the frequency domain).
 
@@ -453,9 +480,11 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
             # Update shared_buffer safely
             with buffer_lock:
-                # Updates shared_buffer with the new complex samples (I/Q), ensuring the buffer size does not exceed its allocated length.
-                # shared_buffer[:len(iq_downsampled)] = iq_downsampled[:len(shared_buffer)]
-                shared_buffer.put(iq_downsampled)  # This will add the data to the queue
+                try:
+                    # shared_buffer.put_nowait(iq_downsampled)
+                    shared_buffer.append(iq_downsampled)
+                except queue.Full:
+                    pass  # Drop the new data instead of blocking
 
     # Disable module
     # print("RX: Stop")
@@ -570,12 +599,19 @@ def rx_loop():
             num_samples=rx_ns
         )
 
+        print("Actual shit2:", rx_gain)
+
         if status < 0:
             print(f"Receive operation failed with error {status}")
             break
         time.sleep(0.05)
         # print(f"bw_powers: {bw_powers[-5:]}")  # Print last 5 entries
         # print(f"power_times: {power_times[-5:]}")
+
+
+        # print("gain_modes:", rx_ch.gain_modes)
+
+
 
 
 
