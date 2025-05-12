@@ -394,7 +394,8 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
             # Write to file main "all-inclusive" I-Q data file
             outfile.write(buf[:num * bytes_per_sample])
-            # buf[:num * bytes_per_sample]: a slice of the buffer that includes only the valid portion (i.e. just the bytes that were filled with new data).
+            # buf[:num * bytes_per_sample]: a slice of the buffer that includes only the valid portion
+            # (i.e. just the bytes that were filled with new data).
 
             # converts the raw byte data in buf into 16-bit integers, representing the received signal samples (I/Q data).
             data = np.frombuffer(buf[:num * bytes_per_sample], dtype=np.int16)
@@ -402,6 +403,17 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
             # Converts the interleaved real (I) and imaginary (Q) parts of the signal into a complex number array (I + jQ).
             iq = data[::2] + 1j * data[1::2]
 
+            iq_test = iq / (num_samples_per_buffer*2)
+
+            test_var = iq_test[0:num]
+
+            print("Wxxx:", np.max(test_var)) # TODO: If this is close to 1, you are overloading the ADC, and should reduce the gain
+            #TODO:  you will want to adjust your gain to try to get that value around 0.5 to 0.8.
+            #TODO: If it is 0.999 that means your receiver is overloaded/saturated and the signal is going to be distorted (it will look smeared throughout the frequency domain).
+
+
+
+            # print("RX: Received", num, "samples")
             # print(iq)
 
             # === Bandwidth Summing (raw full IQ) ===
@@ -412,7 +424,7 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
             # bw_powers.append(power)
 
             # FFT-based BW Summing over BW_FOR_BW_SUMMING
-            window = np.hanning(len(iq))
+            window = np.hanning(len(iq)) #TODO: perhaps i shouldnt window non-plot data !!!!!!!!!
             iq_windowed = iq * window
             norm_factor = np.sum(window) / len(window)
 
