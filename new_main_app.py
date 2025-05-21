@@ -10,6 +10,11 @@ import signal
 import threading
 
 
+
+
+
+from bladerf import *
+
 from datetime import datetime
 from multiprocessing.pool import ThreadPool
 from configparser import ConfigParser
@@ -25,6 +30,17 @@ import pyqtgraph as pg
 from collections import deque
 from bladerf._bladerf import Correction
 
+
+
+
+# Add these manually if they're not exposed by your bindings
+BLADERF_MODULE_RX = 0
+BLADERF_MODULE_TX = 1
+
+BLADERF_CORR_DC_I = 0
+BLADERF_CORR_DC_Q = 1
+BLADERF_CORR_PHASE = 2
+BLADERF_CORR_GAIN = 3
 
 
 
@@ -342,11 +358,38 @@ def update_fft_gui():
 
 
 
+def get_iq_corrections(device, channel):
+    dcoff_i = _bladerf.ffi.new("int16_t *")
+    ret_i = _bladerf.libbladeRF.bladerf_get_correction(device.dev, channel, Correction.DCOFF_I.value, dcoff_i)
+
+    dcoff_q = _bladerf.ffi.new("int16_t *")
+    ret_q = _bladerf.libbladeRF.bladerf_get_correction(device.dev, channel, Correction.DCOFF_Q.value, dcoff_q)
+
+    if ret_i == 0 and ret_q == 0:
+        print(f'Real time (I, Q) == ({dcoff_i[0], dcoff_q[0]})')
+    else:
+        return None, None
+
+
+
+
 def receive(device, channel: int, freq: int, rate: int, gain: int,
             tx_start=None, rx_done=None,
             rxfile: str = '', num_samples: int = 1024):
 
     global shared_buffer, buffer_lock  # Access the global buffer
+
+    dcoff_i = _bladerf.ffi.new("int16_t *")
+    ret_i = _bladerf.libbladeRF.bladerf_get_correction(device.dev[0], BLADERF_MODULE_RX, BLADERF_CORR_DC_I, dcoff_i)
+    dcoff_q = _bladerf.ffi.new("int16_t *")
+    ret_q = _bladerf.libbladeRF.bladerf_get_correction(
+        device.dev[0], BLADERF_MODULE_RX, BLADERF_CORR_DC_Q, dcoff_q
+    )
+
+    if ret_i == 0 and ret_q == 0:
+        print("DCOFF_I =", dcoff_i[0], "and DCOFF_Q =", dcoff_q[0])
+    else:
+        print("Failed to get DCOFF_I:", ret_i)
 
 
 
@@ -448,6 +491,8 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
 
 
+
+
             # b.set_correction(_bladerf.CHANNEL_RX(0), Correction.DCOFF_I, 72)
 
             # val = b.get_correction(_bladerf.CHANNEL_RX(0), Correction.DCOFF_I)
@@ -526,41 +571,8 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
                 except queue.Full:
                     pass  # Drop the new data instead of blocking
 
-    # def measure_dc_spike(iq, fs):
-    #     """Compute the FFT and return the power at the DC bin."""
-    #     iq -= np.mean(iq)  # Optional, if you want to remove software DC
-    #     window = np.hanning(len(iq))
-    #     iq *= window
-    #     fft = np.fft.fftshift(np.fft.fft(iq))
-    #     power = np.abs(fft) ** 2
-    #     dc_index = len(power) // 2
-    #     return power[dc_index]
-    #
-    # def calibrate_dc_offset(device, channel, iq, fs):
-    #     best_dcoff_i = 0
-    #     best_dcoff_q = 0
-    #     min_power = float('inf')
-    #
-    #     for i in range(-2000,2000, 50):
-    #         for q in range(-2000, 2000, 50):
-    #             device.set_correction(channel, Correction.DCOFF_I, i)
-    #             device.set_correction(channel, Correction.DCOFF_Q, q)
-    #
-    #             # Wait a little or take multiple samples
-    #             # iq = iq_receiver()  # Must return a NumPy array of complex I/Q samples
-    #
-    #             dc_power = measure_dc_spike(iq, fs)
-    #
-    #             if dc_power < min_power:
-    #                 min_power = dc_power
-    #                 best_dcoff_i = i
-    #                 best_dcoff_q = q
-    #
-    #     print(f"Optimal DC correction: I={best_dcoff_i}, Q={best_dcoff_q}")
-    #     device.set_correction(channel, Correction.DCOFF_I, best_dcoff_i)
-    #     device.set_correction(channel, Correction.DCOFF_Q, best_dcoff_q)
-    #
-    # calibrate_dc_offset(device, channel, iq, fs)
+
+
 
                 ####################   DEBUGGING TO SEE IF IQ PARAMS GET MAINTAINED                     ############################################################
 
@@ -784,8 +796,8 @@ if __name__ == "__main__":
     timer.timeout.connect(update_fft_gui)  # <- Connect to your function
     timer.start(500)  # Refresh every 50ms
 
-    b.set_correction(rx_channel, Correction.DCOFF_I, 1102)
-    b.set_correction(rx_channel, Correction.DCOFF_Q, -1698)
+    b.set_correction(rx_channel, Correction.DCOFF_I, 652) #-880 for 652, -536 for 1000
+    b.set_correction(rx_channel, Correction.DCOFF_Q, -496) #-496 for 502, -1000 for 1000
 
     time.sleep(1)
 

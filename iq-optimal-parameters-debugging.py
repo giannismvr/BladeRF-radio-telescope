@@ -158,176 +158,17 @@ def load_fpga(device, image):
     return 0
 
 
-# =============================================================================
-# TRANSMIT
-# =============================================================================
-
-# =============================================================================
-# RECEIVE
-# =============================================================================
-
-
-#
-# def update_bw_plots():
-#     global bw_powers, stacked_powers, power_times
-#
-#     if not bw_powers:
-#         return
-#
-#     # 1) Convert to dB
-#     powers_db = 10 * np.log10(np.array(bw_powers) + 1e-12)
-#     times_all = np.array(power_times)
-#     # print(len(bw_powers))
-#     # print(bw_powers)
-#     # print("BW powers list:", bw_powers[::int(len(bw_powers) / 10)])
-#
-#     # 2) Convert time to relative time in seconds (or milliseconds if needed)
-#     times_relative = times_all - times_all[0]  # Time in seconds since the first sample
-    # For milliseconds: times_relative = (times_all - times_all[0]) * 1000
-
-    # 3) Trim both to the last POWER_WINDOW samples
-    if len(powers_db) > POWER_WINDOW:
-        powers_db = powers_db[-POWER_WINDOW:] #keep only the last POWER_WINDOW number of elements
-        # from the powers_db list (which holds your dB values of total power).
-        times_relative = times_relative[-POWER_WINDOW:]
-
-    # 4) Plot raw data
-    # bw_curve.setData(times_relative, powers_db)
-
-    # 5) Save Bandwidth Summing Data to file
-    # with open(bw_file_path, 'ab') as bw_file:
-    #     np.array([times_relative, powers_db], dtype=np.float64).tofile(bw_file)
-    #
-    # # 6) If you have at least as many points as your moving-average window:
-    # window = 10
-    # if len(powers_db) >= window:
-    #     kernel = np.ones(window) / window
-    #     stacked_db = np.convolve(powers_db, kernel, mode='valid')
-    #     times_stacked = times_relative[window - 1:]  # Adjust times for stacked plot
-    # else:
-    #     stacked_db = np.array([])
-    #     times_stacked = np.array([])
-    #
-    # # 7) Plot the exposure-stacked curve
-    # # stacked_curve.setData(times_stacked, stacked_db)
-    #
-    # # 8) Save Exposure Stacking Data to file
-    # with open(stacked_file_path, 'ab') as stacked_file:
-    #     np.array([times_stacked, stacked_db], dtype=np.float64).tofile(stacked_file)
-    #
-    # # Dynamic Y-axis scaling for Bandwidth-Summed Plot
-    # max_power = np.max(powers_db)
-    # min_power = np.min(powers_db)
-    # bw_plot.setYRange(min_power - 10, max_power + 10)  # Add some padding for clarity
-
-    # # Dynamic Y-axis scaling for Stacked Power Plot
-    # if len(stacked_db) > 0:
-    #     max_stacked = np.max(stacked_db)
-    #     min_stacked = np.min(stacked_db)
-        # stacked_plot.setYRange(min_stacked - 10, max_stacked + 10)  # Add some padding for clarity
-
-
 
 
 # Global buffer and lock for thread-safe access
 import threading
 TARGET_FFT_SIZE = 8192*4  # or 4096 for faster updates
-# this makes room for TARGET_FFT_SIZE buffers, not samples, in the queue....!!!!!! so i replaced it....
-# shared_buffer = queue.Queue(maxsize=TARGET_FFT_SIZE)
-# Keep only the 10 most recent FFT buffers
+
+
 shared_buffer = deque(maxlen=10)
 buffer_lock = threading.Lock()
-#
-# def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
-#     global prev_fft_db
-#     """
-#     Extracts FFT from buffer and updates the plot.
-#
-#     Args:
-#         buffer (np.array): Complex I/Q samples.
-#         curve (pyqtgraph.PlotCurveItem): The curve to update.
-#         sample_rate (float): Sample rate in Hz.
-#         center_freq_hz (float): Center frequency in Hz.
-#     """
-#     # TODO clear buffer after plot
-#
-#
-#     if np.any(buffer):  # Skip empty buffer
-#         buffer = buffer - np.mean(buffer)
-#         window = np.hanning(len(buffer))  # Or np.blackman, np.hamming, etc.
-#         buffer_windowed = buffer * window
-#         buffer_windowed = buffer_windowed - np.mean(buffer_windowed) # Remove DC offset (optional but useful)
-#
-#
-#         # Normalize window to preserve signal power
-#         normalization_factor = np.sum(window) / len(window)
-#         fft_vals = np.fft.fftshift(np.fft.fft(buffer_windowed))
-#         fft_vals = fft_vals / (len(buffer) * normalization_factor)  # Normalize properly
-#
-#         # Convert to dB scale
-#         fft_db = 20 * np.log10(np.abs(fft_vals) + 1e-12)
-#
-#         #computes the frequency bins corresponding to the FFT of your signal buffer:
-#         freqs = np.fft.fftshift(np.fft.fftfreq(len(buffer), 1 / sample_rate)) # (1 / sample_rate) == The time between samples, or sample period (T).
-#         # np.fft.fftfreq: This returns an array of frequency bins in Hz: [0, 1, 2, ..., fs/2 - 1, -fs/2, ..., -1] ...
-#         # ...spanning from 0 up to just below sample_rate, then wrapping around to negative frequencies.
-#
-#         #  np.fft.fftshift(...): Reorders the frequencies to center 0 Hz
-#
-#         freqs_mhz = (freqs + center_freq_hz) / 1e6  # Convert to MHz
-#
-#
-#         ## So that only the fc±BW/2 spectrum is shown
-#         bw_half_mhz = BW / 2 / 1e6  # Convert to MHz
-#         valid_indices = ((freqs_mhz >= (center_freq_hz / 1e6 - bw_half_mhz)) &
-#                          (freqs_mhz <= (center_freq_hz / 1e6 + bw_half_mhz)))
 
 
-        # if prev_fft_db is None:
-        #     smoothed_fft_db = fft_db
-        # else:
-        #     smoothed_fft_db = alpha * fft_db + (1 - alpha) * prev_fft_db
-        #
-        # prev_fft_db = smoothed_fft_db
-        # # curve.setData(freqs_mhz, smoothed_fft_db)
-        # curve.setData(freqs_mhz[valid_indices], smoothed_fft_db[valid_indices])
-        # if prev_fft_db is None or len(prev_fft_db) != len(fft_db[valid_indices]):
-        #     smoothed_fft_db = fft_db[valid_indices]
-        # else:
-        #     smoothed_fft_db = alpha * fft_db[valid_indices] + (1 - alpha) * prev_fft_db
-        #
-        # prev_fft_db = smoothed_fft_db
-        # curve.setData(freqs_mhz[valid_indices], smoothed_fft_db)
-        #
-
-
-
-
-# def update_fft_gui():
-#     global shared_buffer, buffer_lock, fft_curve, fs, rx_freq
-#
-#     # Initialize data to None to handle case where the queue is empty
-#     data = None
-#
-#     # try:
-#     #     # Try to get data from the queue without blocking
-#     #     data = shared_buffer.get_nowait()  # Non-blocking, get data
-#     # except queue.Empty:
-#     #     pass  # If the queue is empty, just skip
-#     with buffer_lock:
-#         if len(shared_buffer) == 0:
-#             return
-#         # Get the most recent buffer (or whatever logic you prefer)
-#         data = shared_buffer[-1]
-#
-#     if data is not None:
-#         compute_and_plot_fft(data, fft_curve, fs, rx_freq)
-
-
-
-    # Optional: If you want to clear the queue after processing (to free memory), you can do this
-    # while not shared_buffer.empty():
-    #     shared_buffer.get()
 
     # TODO clear buffer after plot- i think its done properly here:
 
@@ -435,15 +276,7 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
             # Converts the interleaved real (I) and imaginary (Q) parts of the signal into a complex number array (I + jQ).
             iq = data[::2] + 1j * data[1::2]
 
-            # def measure_dc_spike(iq, fs):
-            #     """Compute the FFT and return the power at the DC bin."""
-            #     # iq -= np.mean(iq)  # Optional, if you want to remove software DC
-            #     window = np.hanning(len(iq))
-            #     iq *= window
-            #     fft = np.fft.fftshift(np.fft.fft(iq))
-            #     power = np.abs(fft) ** 2
-            #     dc_index = len(power) // 2
-            #     return power[dc_index]
+
 
             def calibrate_dc_offset(device, channel, fs, fc, num_samples):
                 best_i = 0
@@ -506,26 +339,6 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
                     f.write(
                         f"[{datetime.now().strftime('%H:%M:%S')}] I = {best_i}, Q = {best_q}, DC power = {min_power:.2e}\n")
 
-                # # Optional: Save results to file
-                # with open(iq_debug_filepath, 'a') as f:
-                #     f.write(f"{datetime.now()}: Best I={best_i}, Q={best_q}, power={min_power:.2e}\n")
-                #
-                #     if dc_power < min_power:
-                #         min_power = dc_power
-                #         best_dcoff_q = q
-                #         best_dcoff_i = i
-
-
-                # print(f"Optimal DC correction: I={best_dcoff_i} and Q={best_dcoff_q} (power={min_power:.2f})}")
-                # print(f"Optimal DC correction: Q={best_dcoff_q} (power={min_power:.2f})")
-                # print(f"Optimal DC correction: I={best_dcoff_i}  (power={min_power:.2f})")
-                # device.set_correction(channel, Correction.DCOFF_I, best_dcoff_i)
-                # device.set_correction(channel, Correction.DCOFF_Q, best_dcoff_q)
-                # with open(iq_debug_filepath, 'a') as file:  # 'a' is append mode
-                #
-                #             # file.write(f"for fs = {fs} and rx_freq = {rx_freq}, rx_bw = {BW} and datetime= {datetime}: Best_I:{best_dcoff_i}, Best_q: {best_dcoff_q}" + '\n')  # Write text followed by a newline
-                #             file.write(
-                #                 f"for fs = {fs} and rx_freq = {rx_freq}, rx_bw = {BW} and datetime= {datetime}: Best_I:{best_dcoff_i}, " + '\n')  # Write text followed by a newline
 
             calibrate_dc_offset(device, channel, fs, rx_freq, num_samples)
 
@@ -555,27 +368,6 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
 
 
-            # b.set_correction(_bladerf.CHANNEL_RX(0), Correction.DCOFF_I, 72)
-
-            # val = b.get_correction(_bladerf.CHANNEL_RX(0), Correction.DCOFF_I)
-            # print("DCOFF_I is now set to:", val)
-
-            # Print current correction values
-            # print("DCOFF_I:", device.get_correction(_bladerf.CHANNEL_RX(0), Correction.DCOFF_I))
-            # print("DCOFF_Q:", device.get_correction(_bladerf.CHANNEL_RX(0), Correction.DCOFF_Q))
-
-
-
-
-            # ret = _bladerf.bladerf_set_correction(
-            #     b.dev,  # raw device pointer
-            #     _bladerf.CHANNEL_RX(0),  # RX channel 0
-            #     _bladerf.CORR_DC_I,  # DC correction - I component
-            #     0  # Value (range: -2048 to +2047)
-            # )
-
-            # print(ret)
-
 
             iq_test = iq / (num_samples_per_buffer*2)
 
@@ -597,32 +389,32 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
             # print("power_current:", power)
             # bw_powers.append(power)
 
-            # FFT-based BW Summing over BW_FOR_BW_SUMMING
-            window = np.hanning(len(iq)) #TODO: perhaps i shouldnt window non-plot data !!!!!!!!!
-            iq_windowed = iq * window
-            norm_factor = np.sum(window) / len(window)
-
-            fft_vals = np.fft.fftshift(np.fft.fft(iq_windowed))
-            fft_vals /= (len(iq) * norm_factor)
-            power_spectrum = np.abs(fft_vals) ** 2
-
-            # Frequency axis in Hz
-            freqs = np.fft.fftshift(np.fft.fftfreq(len(iq), 1 / fs))
-            freqs_abs = freqs + freq  # shift to absolute center freq
-
-            # Find indices within ±BW_FOR_BW_SUMMING/2 around fc
-            half_bw = BW_FOR_BW_SUMMING / 2
-            valid_indices = np.where((freqs_abs >= freq - half_bw) & (freqs_abs <= freq + half_bw))[0]
-
-            # Band power in that range
-            band_power = np.sum(power_spectrum[valid_indices])
-            bw_powers.append(band_power)
-
-            power_times.append(time.time())
-
-            # Downsample for GUI only (e.g., take 1 out of every 500 samples)
-            step = max(len(iq) // TARGET_FFT_SIZE, 1)
-            iq_downsampled = iq[::step]
+            # # FFT-based BW Summing over BW_FOR_BW_SUMMING
+            # window = np.hanning(len(iq)) #TODO: perhaps i shouldnt window non-plot data !!!!!!!!!
+            # iq_windowed = iq * window
+            # norm_factor = np.sum(window) / len(window)
+            #
+            # fft_vals = np.fft.fftshift(np.fft.fft(iq_windowed))
+            # fft_vals /= (len(iq) * norm_factor)
+            # power_spectrum = np.abs(fft_vals) ** 2
+            #
+            # # Frequency axis in Hz
+            # freqs = np.fft.fftshift(np.fft.fftfreq(len(iq), 1 / fs))
+            # freqs_abs = freqs + freq  # shift to absolute center freq
+            #
+            # # Find indices within ±BW_FOR_BW_SUMMING/2 around fc
+            # half_bw = BW_FOR_BW_SUMMING / 2
+            # valid_indices = np.where((freqs_abs >= freq - half_bw) & (freqs_abs <= freq + half_bw))[0]
+            #
+            # # Band power in that range
+            # band_power = np.sum(power_spectrum[valid_indices])
+            # bw_powers.append(band_power)
+            #
+            # power_times.append(time.time())
+            #
+            # # Downsample for GUI only (e.g., take 1 out of every 500 samples)
+            # step = max(len(iq) // TARGET_FFT_SIZE, 1)
+            # iq_downsampled = iq[::step]
 
 
             # Update shared_buffer safely
@@ -756,12 +548,6 @@ def rx_loop():
             print(f"Receive operation failed with error {status}")
             break
         time.sleep(0.1)
-        # print(f"bw_powers: {bw_powers[-5:]}")  # Print last 5 entries
-        # print(f"power_times: {power_times[-5:]}")
-
-
-        # print("gain_modes:", rx_ch.gain_modes)
-
 
 
 
@@ -769,54 +555,6 @@ def rx_loop():
 if __name__ == "__main__":
     # TODO start the GUI
 
-
-
-    # app = QtWidgets.QApplication(sys.argv)
-    #
-    # # Set up the GUI as usual
-    # win = pg.GraphicsLayoutWidget(title="Live Signal and FFT Plot")
-    # win.show()
-    #
-    # # Setup the FFT plot
-    # fft_plot = win.addPlot(title="FFT of Signal")
-    # fft_curve = fft_plot.plot(pen='g')
-    #
-    # # Label axes
-    # fft_plot.setLabel('bottom', 'Frequency (MHz)')
-    # fft_plot.setLabel('left', 'Magnitude (dB)')
-    #
-    # # FIX THE AXES — no auto-rescale
-    # center_freq_mhz = rx_freq / 1e6  # Convert to MHz
-    # bandwidth_mhz = BW / 1e6  # Convert to MHz
-    # fft_plot.setXRange(center_freq_mhz - bandwidth_mhz / 2,
-    #                    center_freq_mhz + bandwidth_mhz / 2, padding=0)
-    #
-    # fft_plot.setYRange(-100, 0, padding=0)  # dB range — adjust based on your signal
-    #
-    # # Add Bandwidth-Summed Power Plot
-    # win.nextRow()
-    # bw_plot = win.addPlot(title="Bandwidth Summed Power (dB)")
-    # bw_curve = bw_plot.plot(pen='y')
-    # bw_plot.setLabel('bottom', 'Time (s)')
-    # bw_plot.setLabel('left', 'Power (dB)')
-    # bw_plot.setYRange(-100, 0)
-    #
-    # # Add Exposure Stacked Power Plot
-    # win.nextRow()
-    # stacked_plot = win.addPlot(title="Exposure Stacked Power (dB avg)")
-    # stacked_curve = stacked_plot.plot(pen='c')
-    # stacked_plot.setLabel('bottom', 'Time (s)')
-    # stacked_plot.setLabel('left', 'Smoothed Power (dB)')
-    # stacked_plot.setYRange(-100, 0)
-    #
-    # bw_timer = QtCore.QTimer()
-    # bw_timer.timeout.connect(update_bw_plots)
-    # bw_timer.start(500)  # Every 0.05 sec or as needed
-    #
-    # # Set up timer to refresh GUI
-    # timer = QtCore.QTimer()
-    # timer.timeout.connect(update_fft_gui)  # <- Connect to your function
-    # timer.start(500)  # Refresh every 50ms
 
     # Start RX thread
     rx_thread = threading.Thread(target=rx_loop, daemon=True)
@@ -833,17 +571,3 @@ if __name__ == "__main__":
         print("Exiting program via Ctrl+C")
 
 
-
-    # TODO start threads!!!!
-    # ✔️ Only rx_thread and QTimer are needed now — fft_plot_worker is no longer used
-
-    # Start GUI loop (this must stay in the main thread!)
-    # sys.exit(app.exec_())
-
-"""
-    The return value of status is given by calling the transmit def, which always returns
-    an integer. Thus, simply referencing transmit as an argument of tx_pool.apply_async()
-    "activates" the transmit def, which shall return an integer.
-
-    !!!!!!!!!!!
-"""
