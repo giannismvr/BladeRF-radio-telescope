@@ -13,7 +13,7 @@ config.read('/Users/giannis/PycharmProjects/final_radiotelescope/my_stuff/my_con
 fs = float(config['bladerf2-rx']['rx_samplerate'])       # in Hz
 fc = float(config['bladerf2-rx']['rx_frequency'])        # in Hz
 bw = float(config['bladerf2-rx']['rx_bandwidth'])        # in Hz
-bin_path = '/Users/giannis/PycharmProjects/final_radiotelescope/logs/all_inclusive_2025-05-21_04-30-10.bin'
+bin_path = '/Users/giannis/PycharmProjects/final_radiotelescope/logs/all_inclusive_2025-05-21_15-05-35.bin'
 special_bw = 10e6  # 10 MHz, or whatever range you want (in Hz)
 
 # === Load binary file ===

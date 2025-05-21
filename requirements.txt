@@ -16,3 +16,4 @@ PyQt5_sip==12.17.0
 pyqtgraph==0.13.7
 python-dateutil==2.9.0.post0
 six==1.17.0
+
