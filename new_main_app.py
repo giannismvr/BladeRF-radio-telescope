@@ -10,9 +10,6 @@ import signal
 import threading
 
 
-
-
-
 from bladerf import *
 
 from datetime import datetime
@@ -29,8 +26,6 @@ from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 from collections import deque
 from bladerf._bladerf import Correction
-
-
 
 
 # Add these manually if they're not exposed by your bindings
@@ -64,7 +59,7 @@ power_times = []       # Timestamps of each power measure (for x-axis)
 
 # Load configuration
 config = ConfigParser()
-config.read('/Users/giannis/PycharmProjects/final_radiotelescope/my_stuff/my_configuration.ini')
+config.read('my_stuff/my_configuration.ini')
 
 
 # Get parameters from config
