@@ -60,11 +60,6 @@ fs = float(config['bladerf2-rx']['rx_samplerate'])     # Hz
 
 
 
-
-# Start the Qt event loop
-# app.exec_()
-
-
 prev_fft_db = None
 alpha = 1  # Smoothing factor, adjust as needed
 # The smoothing factor controls how much the new FFT data affects the plot.
@@ -417,13 +412,13 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
             # iq_downsampled = iq[::step]
 
 
-            # Update shared_buffer safely
-            with buffer_lock:
-                try:
-                    # shared_buffer.put_nowait(iq_downsampled)
-                    shared_buffer.append(iq_downsampled)
-                except queue.Full:
-                    pass  # Drop the new data instead of blocking
+            # # Update shared_buffer safely
+            # with buffer_lock:
+            #     try:
+            #         # shared_buffer.put_nowait(iq_downsampled)
+            #         shared_buffer.append(iq_downsampled)
+            #     except queue.Full:
+            #         pass  # Drop the new data instead of blocking
 
 
 

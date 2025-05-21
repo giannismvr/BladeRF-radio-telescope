@@ -415,12 +415,15 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
     print("Actual gain I am applying - (no matter what i put in the .ini file):", ch.gain)
 
     # Setup synchronous stream
-    device.sync_config(layout=_bladerf.ChannelLayout.RX_X1,
-                       fmt=_bladerf.Format.SC16_Q11,
+
+    # for channel 1 AND channel 2 according to gpt
+    device.sync_config(layout=_bladerf.ChannelLayout.RX_X2,
+                       fmt=_bladerf.Format.SC16_Q11_META,
                        num_buffers=16,
                        buffer_size=8192, #samples per buffer
                        num_transfers=8,
                        stream_timeout=3500)
+
 
     # buffer_size: How many samples per buffer (not bytes!) !!!!!!!!!!!!!!!!!!!!!!!!
     # buffer_size is the actual number of samples each buffer contains — not just a limit, but the exact size you’ll get per transfer.
