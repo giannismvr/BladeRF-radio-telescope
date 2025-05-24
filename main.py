@@ -8,10 +8,6 @@
 ###############################################################################
 import signal
 import threading
-
-
-from bladerf import *
-
 from datetime import datetime
 from multiprocessing.pool import ThreadPool
 from configparser import ConfigParser
@@ -50,7 +46,6 @@ bw_file_path = f"./logs/bw_summing_data_{current_datetime}.bin"
 stacked_file_path = f"./logs/exposure_stacking_data_{current_datetime}.bin"
 
 # Bandwidth summing queue (optional) and stacking memory
-bw_powers = []         # All power measurements
 stacked_powers = []    # Sliding window or average of power
 
 
@@ -58,7 +53,6 @@ stacked_powers = []    # Sliding window or average of power
 BW_FOR_BW_SUMMING = 2e6  # for example, 2 MHz
 
 POWER_WINDOW = 100     # Number of points to retain in stacked plot
-power_times = []       # Timestamps of each power measure (for x-axis)
 
 # Load configuration
 config = ConfigParser()
@@ -70,7 +64,9 @@ N_SAMPLES = int(float(config['bladerf2-rx']['rx_num_samples']))
 BW = float(config['bladerf2-rx']['rx_bandwidth'])      # Hz
 rx_freq = float(config['bladerf2-rx']['rx_frequency']) # Hz
 fs = float(config['bladerf2-rx']['rx_samplerate'])     # Hz
-rx_channel = int(config['bladerf2-rx']['rx_channel'])
+rx_channel0 = int(config['bladerf2-rx']['rx_channel0'])
+rx_channel1 = int(config['bladerf2-rx']['rx_channel1'])
+
 
 
 # TODO ignore this class
@@ -259,6 +255,56 @@ tx_pool = ThreadPool(processes=1)
 # RECEIVE
 # =============================================================================
 
+
+exposure_stack_sum = None
+exposure_stack_count = 0
+
+
+# Initialize buffers somewhere globally or in class:
+bw_powers = deque(maxlen=1000)
+power_times = deque(maxlen=1000)
+INTEGRATION_TIME = 10.0  # seconds per integration block
+integration_start = time.time()
+save_dir = "bw_spectra"  # directory to save spectra files
+os.makedirs(save_dir, exist_ok=True)
+
+def save_integrated_spectrum():
+    global bw_powers, power_times, integration_start
+
+    if len(bw_powers) == 0:
+        return  # nothing to save
+
+    # Stack deque elements into a 2D array
+    stacked_spectra = np.vstack(bw_powers)  # shape (n_spectra, spectrum_length)
+    summed_spectrum = np.sum(stacked_spectra, axis=0)
+    avg_spectrum = summed_spectrum / len(bw_powers)
+
+    timestamp = int(integration_start)
+    filename = os.path.join(save_dir, f"spectrum_{timestamp}.npy")
+
+    np.save(filename, avg_spectrum)
+    print(f"Saved integrated spectrum to {filename}")
+
+    # Clear deques
+    bw_powers.clear()
+    power_times.clear()
+    integration_start = time.time()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # Accumulator for summing power over time with respect to frequency
 
 cumulative_power_sum = None
@@ -269,7 +315,7 @@ check3 = False
 check4 = False
 
 def update_bw_plots():
-    global bw_powers, stacked_powers, power_times, cumulative_power_sum, num_summed, max_power_sum, min_power_sum, check3, check4
+    global bw_powers, stacked_powers, power_times, cumulative_power_sum, num_summed, max_power_sum, min_power_sum, check3, check4, integration_start
 
 
     if not bw_powers:
@@ -313,9 +359,29 @@ def update_bw_plots():
     # 6) Plot stacked (cumulative summed) spectrum
     stacked_curve.setData(freqs, cumulative_db)
 
+    current_time = time.time()
+
+    if current_time - integration_start >= INTEGRATION_TIME:
+        # Average the summed spectra over integration time
+        avg_spectrum = cumulative_power_sum / num_summed
+
+        # Convert to dB for saving
+        avg_spectrum_db = 10 * np.log10(avg_spectrum + 1e-12)
+
+        # Save to file as numpy binary for precision and easy reload
+        timestamp = int(integration_start)
+        filename = os.path.join(save_dir, f"spectrum_{timestamp}.npy")
+        np.save(filename, avg_spectrum)
+        print(f"Saved integrated spectrum to {filename}")
+
+        # Reset cumulative sums and counters
+        cumulative_power_sum = None
+        num_summed = 0
+        integration_start = current_time
+
     # 7)save bw summing to file
     spectrum = np.vstack((freqs, cumulative_db)).T  # shape: (N_freq, 2)
-    with open(bw_file_path, 'wb') as bw_file:  # write mode (overwrite) #TODO: WTF does this do?
+    with open(bw_file_path, 'wb') as bw_file:  # write mode (overwrite)
         spectrum.tofile(bw_file)
 
     # 8)
@@ -342,9 +408,16 @@ def update_bw_plots():
     else:
         bw_plot.setYRange(np.min(last_db) - 10, np.max(last_db) + 30)
 
+
+
+
+
+
+
     # print(len(bw_powers))
     # print(bw_powers)
     # print("BW powers list:", bw_powers[::int(len(bw_powers) / 10)])
+
 
     # 2) Convert time to relative time in seconds (or milliseconds if needed)
     # times_relative = times_all - times_all[0]  # Time in seconds since the first sample
@@ -554,9 +627,10 @@ def get_iq_corrections(device, channel):
 
 
 
-def receive(device, channel: int, freq: int, rate: int, gain: int,
+def receive(device, freq: int, rate: int, gain: int,
             tx_start=None, rx_done=None,
             rxfile: str = '', num_samples: int = 1024):
+
 
     global shared_buffer, buffer_lock  # Access the global buffer
 
@@ -579,9 +653,9 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
         print("RX: Invalid device handle.")
         return -1
 
-    if (channel == None):
-        print("RX: Invalid channel.")
-        return -1
+    # if (channel == None):
+    #     print("RX: Invalid channel.")
+    #     return -1
 
     # Configure both RX0 and RX1 channels
     for ch_index in [0, 1]:
@@ -618,6 +692,21 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
                        num_transfers=8, #it was 8 for 1 RX channel...
                        stream_timeout=5000) # before 2 RX channels, it was 3500....!
 
+    ###################################################################################################
+
+    # Assuming `device` is your bladeRF device handle
+
+    ch0 = device.Channel(0)  # RX channel 0
+    current_lo_freq = ch0.frequency  # This returns the LO frequency in Hz (int or float)
+
+    print(f"Current RX LO frequency for channel 0: {current_lo_freq} Hz")
+
+    # enabled = device.is_module_enabled(_bladerf.CHANNEL_RX(0))
+    # print(f"RX module enabled on channel 0: {enabled}")
+
+    #####################################################################################################
+
+
     full_chunk_size = len(buf) // bytes_per_sample  # or your nominal buffer size in samples
     num_full_chunks = num_samples_read // full_chunk_size
 
@@ -629,6 +718,9 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
     # buffer_size: How many samples per buffer (not bytes!) !!!!!!!!!!!!!!!!!!!!!!!!
     # buffer_size is the actual number of samples each buffer contains — not just a limit, but the exact size you’ll get per transfer.
+
+
+
 
     # Enable module
     # print("RX: Start")
@@ -913,9 +1005,9 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
 
 def rx_loop():
-    global rx_freq, rx_ch
+    global rx_freq
     while not stop_event.is_set():
-        rx_ch = _bladerf.CHANNEL_RX(config.getint('bladerf2-rx', 'rx_channel'))
+        # rx_ch = _bladerf.CHANNEL_RX(config.getint('bladerf2-rx', 'rx_channel0'))
         rx_freq = int(config.getfloat('bladerf2-rx', 'rx_frequency'))
         rx_rate = int(config.getfloat('bladerf2-rx', 'rx_samplerate'))
         rx_gain = int(config.getfloat('bladerf2-rx', 'rx_gain'))
@@ -931,7 +1023,6 @@ def rx_loop():
 
         status = receive(
             device=my_bladerf,
-            channel=rx_ch,
             freq=rx_freq,
             rate=rx_rate,
             gain=rx_gain,
@@ -1014,8 +1105,12 @@ if __name__ == "__main__":
     timer.timeout.connect(update_fft_gui)  # <- Connect to your function
     timer.start(500)  # Refresh every 50ms
 
-    my_bladerf.set_correction(rx_channel, Correction.DCOFF_I, 652) #-880 for 652, -536 for 1000
-    my_bladerf.set_correction(rx_channel, Correction.DCOFF_Q, -496) #-496 for 502, -1000 for 1000
+    my_bladerf.set_correction(rx_channel0, Correction.DCOFF_I, 652) #-880 for 652, -536 for 1000
+    my_bladerf.set_correction(rx_channel0, Correction.DCOFF_Q, -496) #-496 for 502, -1000 for 1000
+
+    my_bladerf.set_correction(rx_channel1, Correction.DCOFF_I, 652)  # -880 for 652, -536 for 1000
+    my_bladerf.set_correction(rx_channel1, Correction.DCOFF_Q, -496)  # -496 for 502, -1000 for 1000
+
 
     time.sleep(1)
 
