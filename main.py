@@ -263,9 +263,13 @@ tx_pool = ThreadPool(processes=1)
 
 cumulative_power_sum = None
 num_summed = 0
+max_power_sum = 0
+min_power_sum = 9999
+check3 = False
+check4 = False
 
 def update_bw_plots():
-    global bw_powers, stacked_powers, power_times, cumulative_power_sum, num_summed
+    global bw_powers, stacked_powers, power_times, cumulative_power_sum, num_summed, max_power_sum, min_power_sum, check3, check4
 
 
     if not bw_powers:
@@ -296,8 +300,8 @@ def update_bw_plots():
         cumulative_power_sum = np.sum(powers_array, axis=0)
         num_summed = powers_array.shape[0]
     else:
-        cumulative_power_sum = np.sum(powers_array, axis=0)
-        num_summed = powers_array.shape[0]
+        cumulative_power_sum += np.sum(powers_array, axis=0)
+        num_summed += powers_array.shape[0]
 
     # 4) Convert cumulative sum to dB
     cumulative_db = 10 * np.log10(cumulative_power_sum + 1e-12)
@@ -309,8 +313,7 @@ def update_bw_plots():
     # 6) Plot stacked (cumulative summed) spectrum
     stacked_curve.setData(freqs, cumulative_db)
 
-    # 7)
-    cumulative_db = 10 * np.log10(cumulative_power_sum + 1e-12)
+    # 7)save bw summing to file
     spectrum = np.vstack((freqs, cumulative_db)).T  # shape: (N_freq, 2)
     with open(bw_file_path, 'wb') as bw_file:  # write mode (overwrite) #TODO: WTF does this do?
         spectrum.tofile(bw_file)
@@ -326,14 +329,25 @@ def update_bw_plots():
     stacked_plot.setYRange(min_pow - 10, max_pow + 10)
 
     last_db = 10 * np.log10(powers_array[-1] + 1e-12)
-    bw_plot.setYRange(np.min(last_db) - 10, np.max(last_db) + 10)
+    if max_power_sum < np.max(last_db):
+        max_power_sum = np.max(last_db)
+        check3 = True
+    if min_power_sum > np.min(last_db):
+        min_power_sum = np.min(last_db)
+        check4 = True
+
+
+    if check3 and check4:
+        bw_plot.setYRange(min_power_sum - 10, max_power_sum + 30)
+    else:
+        bw_plot.setYRange(np.min(last_db) - 10, np.max(last_db) + 30)
 
     # print(len(bw_powers))
     # print(bw_powers)
     # print("BW powers list:", bw_powers[::int(len(bw_powers) / 10)])
 
     # 2) Convert time to relative time in seconds (or milliseconds if needed)
-    times_relative = times_all - times_all[0]  # Time in seconds since the first sample
+    # times_relative = times_all - times_all[0]  # Time in seconds since the first sample
     # For milliseconds: times_relative = (times_all - times_all[0]) * 1000
 
     # 3) Trim both to the last POWER_WINDOW samples
@@ -591,18 +605,27 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
     # Setup synchronous stream
     # 8 bytes total per interleaved complex sample pair (CH0 + CH1).
     bytes_per_sample = 4*2 # 2 bytes I + 2 bytes Q == 4 bytes for 1 channel, so for 2, it will be 2_x_that
-    num_samples_per_buffer = 8192 * 2  # total samples (I+Q pairs), shared across RX0 and RX1
+    num_samples_per_buffer = 8192 * 2  # total samples (I+Q pairs), shared across RX0 and RX1, NOT INTERLEAVED
+    num_samples_interleaved = num_samples_per_buffer // 2
     buf = bytearray(num_samples_per_buffer * bytes_per_sample)
     num_samples_read = 0
 
     # for channel 1 AND channel 2 according to gpt
     device.sync_config(layout=_bladerf.ChannelLayout.RX_X2,
                        fmt=_bladerf.Format.SC16_Q11,
-                       num_buffers=16*4, # 16 was for 1 buffer, for convenience i added 16*4 for 2 RX channels
-                       buffer_size=num_samples_per_buffer, # previous: 8192samples per buffer, now,for 2 RX channels: 8192*2, BUT: THEY SHARE THE SAME (1) BUFFER
-                       num_transfers=8*2, #it was 8 for 1 RX channel...
+                       num_buffers=16, # 16 was for 1 buffer, for convenience i added 16*4 for 2 RX channels
+                       buffer_size=num_samples_interleaved, # interleaved = per_buffer / 2
+                       num_transfers=8, #it was 8 for 1 RX channel...
                        stream_timeout=5000) # before 2 RX channels, it was 3500....!
 
+    full_chunk_size = len(buf) // bytes_per_sample  # or your nominal buffer size in samples
+    num_full_chunks = num_samples_read // full_chunk_size
+
+    # Use only full chunks
+    usable_samples = full_chunk_size * num_full_chunks
+    buffer_for_bw_sum = buf[:usable_samples * bytes_per_sample]
+
+    # Process buffer_for_bw_sum in fixed-size chunks for summing
 
     # buffer_size: How many samples per buffer (not bytes!) !!!!!!!!!!!!!!!!!!!!!!!!
     # buffer_size is the actual number of samples each buffer contains — not just a limit, but the exact size you’ll get per transfer.
@@ -657,6 +680,10 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
                 print(f"len buf =={len(buf)}") # this prints (bytes_per_sample * num_samples_per_buffer)
                 num = min(len(buf) // bytes_per_sample,
                           num_samples - num_samples_read)
+                if (num_samples - num_samples_read) < (len(buf) // bytes_per_sample):
+                    print(f"Found it: num_samples - num_samples_read === {num_samples - num_samples_read}")
+                else:
+                    print(f"Other Case (usual), len(buf) // bytes_per_sample === {len(buf) // bytes_per_sample}")
             else:
                 print("What? Num_samples < 0 ????? how can that happen?? Num_samples is: ", num_samples)
                 num = len(buf) // bytes_per_sample
@@ -919,7 +946,7 @@ def rx_loop():
         if status < 0:
             print(f"Receive operation failed with error {status}")
             break
-        time.sleep(0.05)  #TODO: delete this delay after
+        # time.sleep(0.05)  #TODO: delete this delay after
         # print(f"bw_powers: {bw_powers[-5:]}")  # Print last 5 entries
         # print(f"power_times: {power_times[-5:]}")
         print("RX thread exiting.")
