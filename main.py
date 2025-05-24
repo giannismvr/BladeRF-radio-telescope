@@ -38,6 +38,8 @@ BLADERF_CORR_DC_Q = 1
 BLADERF_CORR_PHASE = 2
 BLADERF_CORR_GAIN = 3
 
+CONCENTRATION_FREQUENCY = 2.4e9
+
 
 
 # Global shutdown flag
@@ -177,6 +179,78 @@ def load_fpga(device, image):
     return 0
 
 
+
+
+
+# Set libbladeRF verbosity level
+verbosity = config.get('common', 'libbladerf_verbosity').upper()
+if (verbosity == "VERBOSE"):
+    _bladerf.set_verbosity(0)
+elif (verbosity == "DEBUG"):
+    _bladerf.set_verbosity(1)
+elif (verbosity == "INFO"):
+    _bladerf.set_verbosity(2)
+elif (verbosity == "WARNING"):
+    _bladerf.set_verbosity(3)
+elif (verbosity == "ERROR"):
+    _bladerf.set_verbosity(4)
+elif (verbosity == "CRITICAL"):
+    _bladerf.set_verbosity(5)
+elif (verbosity == "SILENT"):
+    _bladerf.set_verbosity(6)
+else:
+    print("Invalid libbladerf_verbosity specified in configuration file:",
+          verbosity)
+    shutdown(error=-1, board=None)
+
+# =============================================================================
+# BEGIN !!!
+# =============================================================================
+
+uut = probe_bladerf()
+
+if (uut == None):
+    print("No bladeRFs detected. Exiting.")
+    shutdown(error=-1, board=None)
+
+my_bladerf = _bladerf.BladeRF(uut)
+
+
+
+board_name = my_bladerf.board_name
+print(board_name)
+fpga_size = my_bladerf.fpga_size
+
+if (config.getboolean(board_name + '-load-fpga', 'enable')):
+    print("Loading FPGA...")
+    try:
+        status = load_fpga(my_bladerf, config.get(board_name + '-load-fpga',
+                                         'image_' + str(fpga_size) + 'kle'))
+    except:
+        print("ERROR loading FPGA.")
+        raise
+
+    if (status < 0):
+        print("ERROR loading FPGA.")
+        shutdown(error=status, board=my_bladerf)
+else:
+    print("Skipping FPGA load due to configuration setting.")
+
+status = print_versions(device=my_bladerf)
+
+# TODO: can we have >1 rx/tx pool workers because 2x2 MIMO?
+rx_pool = ThreadPool(processes=1)
+tx_pool = ThreadPool(processes=1)
+
+
+
+
+# TODO append to rx data buffer
+# TODO check if rx buffer is full
+# TODO check if main file is full
+
+
+
 # =============================================================================
 # TRANSMIT
 # =============================================================================
@@ -185,17 +259,75 @@ def load_fpga(device, image):
 # RECEIVE
 # =============================================================================
 
+# Accumulator for summing power over time with respect to frequency
 
+cumulative_power_sum = None
+num_summed = 0
 
 def update_bw_plots():
-    global bw_powers, stacked_powers, power_times
+    global bw_powers, stacked_powers, power_times, cumulative_power_sum, num_summed
+
 
     if not bw_powers:
         return
 
-    # 1) Convert to dB
-    powers_db = 10 * np.log10(np.array(bw_powers) + 1e-12)
+
     times_all = np.array(power_times)
+
+
+    # stack into a (N_time, N_freq) array; will error if any row has wrong length
+    powers_array = np.stack(bw_powers, axis=0)
+
+    # powers_db = 10 * np.log10(powers_array + 1e-12)
+
+    # 2) Frequency axis around CONCENTRATION_FREQUENCY
+    N_freq = powers_array.shape[1]
+    half_bw = BW_FOR_BW_SUMMING / 2
+    freqs = np.linspace(CONCENTRATION_FREQUENCY - half_bw,
+                        CONCENTRATION_FREQUENCY + half_bw,
+                        N_freq)
+
+    # 2.5) Keep only last POWER_WINDOW spectra
+    if powers_array.shape[0] > POWER_WINDOW:
+        powers_array = powers_array[-POWER_WINDOW:]
+
+    # 3) Sum new data into cumulative buffer
+    if cumulative_power_sum is None:
+        cumulative_power_sum = np.sum(powers_array, axis=0)
+        num_summed = powers_array.shape[0]
+    else:
+        cumulative_power_sum = np.sum(powers_array, axis=0)
+        num_summed = powers_array.shape[0]
+
+    # 4) Convert cumulative sum to dB
+    cumulative_db = 10 * np.log10(cumulative_power_sum + 1e-12)
+
+    # 5) Plot current (latest) CUMULATIVE spectrum
+    bw_curve.setData(freqs, cumulative_db)  # stacked version
+
+
+    # 6) Plot stacked (cumulative summed) spectrum
+    stacked_curve.setData(freqs, cumulative_db)
+
+    # 7)
+    cumulative_db = 10 * np.log10(cumulative_power_sum + 1e-12)
+    spectrum = np.vstack((freqs, cumulative_db)).T  # shape: (N_freq, 2)
+    with open(bw_file_path, 'wb') as bw_file:  # write mode (overwrite) #TODO: WTF does this do?
+        spectrum.tofile(bw_file)
+
+    # 8)
+    with open(stacked_file_path, 'wb') as stacked_file:
+        spectrum_stacked = np.vstack((freqs, cumulative_db)).T  # shape: (N_freq, 2)
+        spectrum_stacked.tofile(stacked_file)
+
+    # 9) Dynamic Y-axis scaling
+    min_pow = np.min(cumulative_db)
+    max_pow = np.max(cumulative_db)
+    stacked_plot.setYRange(min_pow - 10, max_pow + 10)
+
+    last_db = 10 * np.log10(powers_array[-1] + 1e-12)
+    bw_plot.setYRange(np.min(last_db) - 10, np.max(last_db) + 10)
+
     # print(len(bw_powers))
     # print(bw_powers)
     # print("BW powers list:", bw_powers[::int(len(bw_powers) / 10)])
@@ -205,45 +337,77 @@ def update_bw_plots():
     # For milliseconds: times_relative = (times_all - times_all[0]) * 1000
 
     # 3) Trim both to the last POWER_WINDOW samples
-    if len(powers_db) > POWER_WINDOW:
-        powers_db = powers_db[-POWER_WINDOW:] #keep only the last POWER_WINDOW number of elements
+    # if len(powers_db) > POWER_WINDOW:
+        # powers_db = powers_db[-POWER_WINDOW:] #keep only the last POWER_WINDOW number of elements
         # from the powers_db list (which holds your dB values of total power).
-        times_relative = times_relative[-POWER_WINDOW:]
+        # times_relative = times_relative[-POWER_WINDOW:]
 
-    # 4) Plot raw data
-    bw_curve.setData(times_relative, powers_db)
+    # 3) Average over time for exposure stacking
+    # stacked_db = np.mean(powers_db, axis=0)  # Mean dB per frequency bin
+
+
+    # 4) Plot the current spectrum (last timestamp)
+    # bw_curve.setData(freqs, powers_db[-1])  # Last spectrum
+
+    # 4) Plot raw data, with respect to time
+    # bw_curve.setData(times_relative, powers_db)
 
     # 5) Save Bandwidth Summing Data to file
-    with open(bw_file_path, 'ab') as bw_file:
-        np.array([times_relative, powers_db], dtype=np.float64).tofile(bw_file)
+    # with open(bw_file_path, 'ab') as bw_file:
+    #     np.array([times_relative, powers_db], dtype=np.float64).tofile(bw_file)
 
-    # 6) If you have at least as many points as your moving-average window:
-    window = 10
-    if len(powers_db) >= window:
-        kernel = np.ones(window) / window
-        stacked_db = np.convolve(powers_db, kernel, mode='valid')
-        times_stacked = times_relative[window - 1:]  # Adjust times for stacked plot
-    else:
-        stacked_db = np.array([])
-        times_stacked = np.array([])
+    # 5) Save Bandwidth Summing Data to file
+    # with open(bw_file_path, 'ab') as bw_file:
+    #     spectrum_data = np.vstack((freqs, powers_db[-1]))  # Shape: (2, N_freq)
+    #     spectrum_data.T.tofile(bw_file)  # Save as (freq, power) pairs
 
-    # 7) Plot the exposure-stacked curve
-    stacked_curve.setData(times_stacked, stacked_db)
+    # 6) Plot the exposure-stacked spectrum
+    # stacked_curve.setData(freqs, stacked_db)
 
-    # 8) Save Exposure Stacking Data to file
-    with open(stacked_file_path, 'ab') as stacked_file:
-        np.array([times_stacked, stacked_db], dtype=np.float64).tofile(stacked_file)
+    # 7) Save Exposure Stacking Data to file
+    # with open(stacked_file_path, 'ab') as stacked_file:
+    #     stacked_spectrum_data = np.vstack((freqs, stacked_db[-1])).T  # Shape: (N_freq, 2)
+    #     stacked_spectrum_data.tofile(stacked_file)
 
-    # Dynamic Y-axis scaling for Bandwidth-Summed Plot
-    max_power = np.max(powers_db)
-    min_power = np.min(powers_db)
-    bw_plot.setYRange(min_power - 10, max_power + 10)  # Add some padding for clarity
-
-    # Dynamic Y-axis scaling for Stacked Power Plot
-    if len(stacked_db) > 0:
-        max_stacked = np.max(stacked_db)
-        min_stacked = np.min(stacked_db)
-        stacked_plot.setYRange(min_stacked - 10, max_stacked + 10)  # Add some padding for clarity
+    # 8) Dynamic Y-axis scaling
+    # max_power = np.max(powers_db[-1])
+    # min_power = np.min(powers_db[-1])
+    # bw_plot.setYRange(min_power - 10, max_power + 10)
+    #
+    # if len(stacked_db) > 0:
+    #     max_stacked = np.max(stacked_db)
+    #     min_stacked = np.min(stacked_db)
+    #     stacked_plot.setYRange(min_stacked - 10, max_stacked + 10)
+    #
+    #
+    #
+    # # 6) If you have at least as many points as your moving-average window:
+    # window = 10
+    # if len(powers_db) >= window:
+    #     kernel = np.ones(window) / window
+    #     stacked_db = np.convolve(powers_db, kernel, mode='valid')
+    #     times_stacked = times_relative[window - 1:]  # Adjust times for stacked plot
+    # else:
+    #     stacked_db = np.array([])
+    #     times_stacked = np.array([])
+    #
+    # # 7) Plot the exposure-stacked curve
+    # stacked_curve.setData(times_stacked, stacked_db)
+    #
+    # # 8) Save Exposure Stacking Data to file
+    # with open(stacked_file_path, 'ab') as stacked_file:
+    #     np.array([times_stacked, stacked_db], dtype=np.float64).tofile(stacked_file)
+    #
+    # # Dynamic Y-axis scaling for Bandwidth-Summed Plot
+    # max_power = np.max(powers_db)
+    # min_power = np.min(powers_db)
+    # bw_plot.setYRange(min_power - 10, max_power + 10)  # Add some padding for clarity
+    #
+    # # Dynamic Y-axis scaling for Stacked Power Plot
+    # if len(stacked_db) > 0:
+    #     max_stacked = np.max(stacked_db)
+    #     min_stacked = np.min(stacked_db)
+    #     stacked_plot.setYRange(min_stacked - 10, max_stacked + 10)  # Add some padding for clarity
 
 
 
@@ -254,7 +418,10 @@ TARGET_FFT_SIZE = 8192*4  # or 4096 for faster updates
 # this makes room for TARGET_FFT_SIZE buffers, not samples, in the queue....!!!!!! so i replaced it....
 # shared_buffer = queue.Queue(maxsize=TARGET_FFT_SIZE)
 # Keep only the 10 most recent FFT buffers
-shared_buffer = deque(maxlen=10)
+shared_buffer = {
+    0: deque(maxlen=10),  # For RX channel 0
+    1: deque(maxlen=10),  # For RX channel 1
+}
 buffer_lock = threading.Lock()
 
 def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
@@ -323,10 +490,7 @@ def compute_and_plot_fft(buffer, curve, sample_rate, center_freq_hz):
 
 
 def update_fft_gui():
-    global shared_buffer, buffer_lock, fft_curve, fs, rx_freq
-
-    # Initialize data to None to handle case where the queue is empty
-    data = None
+    global shared_buffer, buffer_lock, fs, rx_freq, fft_curve_ch0, fft_curve_ch1
 
     # try:
     #     # Try to get data from the queue without blocking
@@ -334,13 +498,16 @@ def update_fft_gui():
     # except queue.Empty:
     #     pass  # If the queue is empty, just skip
     with buffer_lock:
-        if len(shared_buffer) == 0:
+        if len(shared_buffer[0]) == 0 or len(shared_buffer[1]) == 0:
             return
-        # Get the most recent buffer (or whatever logic you prefer)
-        data = shared_buffer[-1]
 
-    if data is not None:
-        compute_and_plot_fft(data, fft_curve, fs, rx_freq)
+        chan0_buf = shared_buffer[0][-1]
+        chan1_buf = shared_buffer[1][-1]
+
+    if chan0_buf is not None:
+        compute_and_plot_fft(chan0_buf, fft_curve_ch0, fs, rx_freq)
+    if chan1_buf is not None:
+        compute_and_plot_fft(chan1_buf, fft_curve_ch1, fs, rx_freq)
 
 
 
@@ -349,9 +516,6 @@ def update_fft_gui():
     #     shared_buffer.get()
 
     # TODO clear buffer after plot- i think its done properly here:
-
-
-
 
 
 def get_iq_corrections(device, channel):
@@ -368,6 +532,13 @@ def get_iq_corrections(device, channel):
 
 
 
+# meta = _bladerf.ffi.new("struct bladerf_metadata *")
+# _bladerf.libbladeRF.bladerf_init_metadata(meta)
+# meta.flags = _bladerf.libbladeRF.BLADERF_META_FLAG_RX_NOW
+
+# my_bladerf.enable_module(_bladerf.libbladeRF.BLADERF_MODULE_RX, True)
+
+
 
 def receive(device, channel: int, freq: int, rate: int, gain: int,
             tx_start=None, rx_done=None,
@@ -375,12 +546,12 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
     global shared_buffer, buffer_lock  # Access the global buffer
 
+
+
     dcoff_i = _bladerf.ffi.new("int16_t *")
     ret_i = _bladerf.libbladeRF.bladerf_get_correction(device.dev[0], BLADERF_MODULE_RX, BLADERF_CORR_DC_I, dcoff_i)
     dcoff_q = _bladerf.ffi.new("int16_t *")
-    ret_q = _bladerf.libbladeRF.bladerf_get_correction(
-        device.dev[0], BLADERF_MODULE_RX, BLADERF_CORR_DC_Q, dcoff_q
-    )
+    ret_q = _bladerf.libbladeRF.bladerf_get_correction(device.dev[0], BLADERF_MODULE_RX, BLADERF_CORR_DC_Q, dcoff_q)
 
     if ret_i == 0 and ret_q == 0:
         print("DCOFF_I =", dcoff_i[0], "and DCOFF_Q =", dcoff_q[0])
@@ -398,13 +569,16 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
         print("RX: Invalid channel.")
         return -1
 
-    # Configure BladeRF
-    ch = device.Channel(channel)
-    ch.frequency = freq
-    ch.sample_rate = rate
-    ch.gain = gain
+    # Configure both RX0 and RX1 channels
+    for ch_index in [0, 1]:
+        ch = device.Channel(ch_index)
+        ch.frequency = freq
+        ch.sample_rate = rate
+        ch.gain = gain
 
-
+    # TODO: this must be done after the gain, freq settings (eg ch.gain = ....)
+    my_bladerf.enable_module(_bladerf.CHANNEL_RX(0), True)
+    my_bladerf.enable_module(_bladerf.CHANNEL_RX(1), True)
 
 
     #Actual gain I am getting - no matter what.
@@ -415,14 +589,19 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
     print("Actual gain I am applying - (no matter what i put in the .ini file):", ch.gain)
 
     # Setup synchronous stream
+    # 8 bytes total per interleaved complex sample pair (CH0 + CH1).
+    bytes_per_sample = 4*2 # 2 bytes I + 2 bytes Q == 4 bytes for 1 channel, so for 2, it will be 2_x_that
+    num_samples_per_buffer = 8192 * 2  # total samples (I+Q pairs), shared across RX0 and RX1
+    buf = bytearray(num_samples_per_buffer * bytes_per_sample)
+    num_samples_read = 0
 
     # for channel 1 AND channel 2 according to gpt
     device.sync_config(layout=_bladerf.ChannelLayout.RX_X2,
-                       fmt=_bladerf.Format.SC16_Q11_META,
-                       num_buffers=16,
-                       buffer_size=8192, #samples per buffer
-                       num_transfers=8,
-                       stream_timeout=3500)
+                       fmt=_bladerf.Format.SC16_Q11,
+                       num_buffers=16*4, # 16 was for 1 buffer, for convenience i added 16*4 for 2 RX channels
+                       buffer_size=num_samples_per_buffer, # previous: 8192samples per buffer, now,for 2 RX channels: 8192*2, BUT: THEY SHARE THE SAME (1) BUFFER
+                       num_transfers=8*2, #it was 8 for 1 RX channel...
+                       stream_timeout=5000) # before 2 RX channels, it was 3500....!
 
 
     # buffer_size: How many samples per buffer (not bytes!) !!!!!!!!!!!!!!!!!!!!!!!!
@@ -430,26 +609,37 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
     # Enable module
     # print("RX: Start")
-    ch.enable = True
+    # ch.enable = True #TODO: not sure if this should be commented out.... I think (gpt) since I do "device.enable_module(_bladerf.BLADERF_CHANNEL_RX(0), True)" and "device.enable_module(_bladerf.BLADERF_CHANNEL_RX(1), True)" i am good
 
     print("gain_modes:", ch.gain_modes)
     print("RX gain:", int(config.getfloat('bladerf2-rx', 'rx_gain')))
-    print("CH0: manual gain range:", b.get_gain_range(_bladerf.CHANNEL_RX(0)))  # ch 0 or 1
-    print("CH1: manual gain range:", b.get_gain_range(_bladerf.CHANNEL_RX(1)))  # ch 0 or 1
+    print("CH0: manual gain range:", my_bladerf.get_gain_range(_bladerf.CHANNEL_RX(0)))  # ch 0 or 1
+    print("CH1: manual gain range:", my_bladerf.get_gain_range(_bladerf.CHANNEL_RX(1)))  # ch 0 or 1
 
-    # print(b.get_gain_range(_bladerf.CHANNEL_RX(0)))
+    # print(my_bladerfget_gain_range(_bladerf.CHANNEL_RX(0)))
 
 
     # Create receive buffer
-    bytes_per_sample = 4
+
 
 
     # TODO: Replace num_samples with 1024 or some shit - I did!!!
 
-    num_samples_per_buffer = 8192
+    # Create receive buffer for interleaved RX_X2 (I0, Q0, I1, Q1)
+    # Create receive buffer for interleaved RX_X2 (I0, Q0, I1, Q1)
 
-    buf = bytearray(num_samples_per_buffer * bytes_per_sample)
-    num_samples_read = 0
+
+
+    #TODO: check if this is correct:
+    num_samples_per_channel = num_samples_per_buffer / 2 #TODO: or //2
+
+    # buf0 = _bladerf.ffi.new("int16_t[]", buffer_size * 2)
+    # buf1 = _bladerf.ffi.new("int16_t[]", buffer_size * 2)
+
+    # my_bladerf.sync_rx(buf0, buffer_size, meta0)  # For channel 0
+    # my_bladerf.sync_rx(buf1, buffer_size, meta1)  # For channel 1
+
+
 
     # print("len of buffer:", len(buf))
 
@@ -460,11 +650,11 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
     # Save the samples
     with open(rxfile, 'ab') as outfile:
-        while True:
+        while not (stop_event and stop_event.is_set()):
             if num_samples > 0 and num_samples_read == num_samples:
                 break
             elif num_samples > 0:
-                # print(len(buf))
+                print(f"len buf =={len(buf)}") # this prints (bytes_per_sample * num_samples_per_buffer)
                 num = min(len(buf) // bytes_per_sample,
                           num_samples - num_samples_read)
             else:
@@ -485,16 +675,25 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
             # converts the raw byte data in buf into 16-bit integers, representing the received signal samples (I/Q data).
             data = np.frombuffer(buf[:num * bytes_per_sample], dtype=np.int16)
 
+
+            # deinterleave: [I0,Q0,I1,Q1,...]
+            i0 = data[0::4]
+            q0 = data[1::4]
+            i1 = data[2::4]
+            q1 = data[3::4]
+
+            # complex arrays for each channel
+            ch0 = i0 + 1j * q0
+            ch1 = i1 + 1j * q1
+
             # Converts the interleaved real (I) and imaginary (Q) parts of the signal into a complex number array (I + jQ).
             iq = data[::2] + 1j * data[1::2]
 
 
 
+            # my_bladerfset_correction(_bladerf.CHANNEL_RX(0), Correction.DCOFF_I, 72)
 
-
-            # b.set_correction(_bladerf.CHANNEL_RX(0), Correction.DCOFF_I, 72)
-
-            # val = b.get_correction(_bladerf.CHANNEL_RX(0), Correction.DCOFF_I)
+            # val = my_bladerfget_correction(_bladerf.CHANNEL_RX(0), Correction.DCOFF_I)
             # print("DCOFF_I is now set to:", val)
 
             # Print current correction values
@@ -505,7 +704,7 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
 
             # ret = _bladerf.bladerf_set_correction(
-            #     b.dev,  # raw device pointer
+            #     my_bladerfdev,  # raw device pointer
             #     _bladerf.CHANNEL_RX(0),  # RX channel 0
             #     _bladerf.CORR_DC_I,  # DC correction - I component
             #     0  # Value (range: -2048 to +2047)
@@ -513,16 +712,13 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 
             # print(ret)
 
-
-            iq_test = iq / (num_samples_per_buffer*2)
+            iq_test = iq / (num_samples_per_buffer * 2)
 
             test_var = iq_test[0:num]
 
             # print("Wxxx:", np.max(test_var)) # TODO: If this is close to 1, you are overloading the ADC, and should reduce the gain
             #TODO:  you will want to adjust your gain to try to get that value around 0.5 to 0.8.
             #TODO: If it is 0.999 that means your receiver is overloaded/saturated and the signal is going to be distorted (it will look smeared throughout the frequency domain).
-
-
 
             # print("RX: Received", num, "samples")
             # print(iq)
@@ -535,7 +731,7 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
             # bw_powers.append(power)
 
             # FFT-based BW Summing over BW_FOR_BW_SUMMING
-            window = np.hanning(len(iq)) #TODO: perhaps i shouldnt window non-plot data !!!!!!!!!
+            window = np.hanning(len(iq)) #TODO: perhaps i shouldn't window non-plot data !!!!!!!!!
             iq_windowed = iq * window
             norm_factor = np.sum(window) / len(window)
 
@@ -543,42 +739,95 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
             fft_vals /= (len(iq) * norm_factor)
             power_spectrum = np.abs(fft_vals) ** 2
 
+
             # Frequency axis in Hz
             freqs = np.fft.fftshift(np.fft.fftfreq(len(iq), 1 / fs))
             freqs_abs = freqs + freq  # shift to absolute center freq
 
             # Find indices within ±BW_FOR_BW_SUMMING/2 around fc
             half_bw = BW_FOR_BW_SUMMING / 2
-            valid_indices = np.where((freqs_abs >= freq - half_bw) & (freqs_abs <= freq + half_bw))[0]
 
-            # Band power in that range
-            band_power = np.sum(power_spectrum[valid_indices])
-            bw_powers.append(band_power)
+
+            valid_indices = np.where(
+                (freqs_abs >= CONCENTRATION_FREQUENCY - half_bw) &
+                (freqs_abs <= CONCENTRATION_FREQUENCY + half_bw)
+            )[0]
+
+            # Define how many points you want in the band-limited spectrum
+
+            # N_BW_POINTS = int(np.round(BW_FOR_BW_SUMMING * fft_len / fs))
+
+
+            # Center index around CONCENTRATION_FREQUENCY
+            # center_idx = np.argmin(np.abs(freqs_abs - CONCENTRATION_FREQUENCY))
+            # half_n = N_BW_POINTS // 2
+            # start = max(center_idx - half_n, 0)
+            # end = min(center_idx + half_n, len(power_spectrum))
+
+            # Assume:
+            # - power_spectrum: 1D array of power values (after FFT)
+            # - freqs_abs: 1D array of absolute frequencies (same length as power_spectrum)
+            # - CONCENTRATION_FREQUENCY = fc
+            # - BW_FOR_BW_SUMMING = bw
+            # - fs = sampling rate
+            # - fft_len = len(iq)
+
+            # Step 1: Determine how many FFT bins correspond to the desired BW
+            fft_len = len(iq)
+            bin_width = fs / fft_len
+            N_BW_POINTS = int(round(BW_FOR_BW_SUMMING / bin_width))
+            half_n = N_BW_POINTS // 2
+
+            # Step 2: Find center index in freqs_abs corresponding to fc
+            center_idx = np.argmin(np.abs(freqs_abs - CONCENTRATION_FREQUENCY))
+
+            # Step 3: Calculate desired range
+            start = center_idx - half_n
+            end = center_idx + half_n
+
+            # Step 4: Prepare zero-padded band_spectrum
+            band_spectrum = np.zeros(N_BW_POINTS)
+
+            # Step 5: Extract valid portion of power_spectrum and insert it into band_spectrum
+            valid_start = max(start, 0)
+            valid_end = min(end, len(power_spectrum))
+
+            insert_start = valid_start - start  # Offset if start < 0
+            insert_end = insert_start + (valid_end - valid_start)
+
+            band_spectrum[insert_start:insert_end] = power_spectrum[valid_start:valid_end]
+
+            # guard: only append if the length is exactly N_BW_POINTS
+            if len(band_spectrum) == N_BW_POINTS:
+                bw_powers.append(band_spectrum)
+            else:
+                # this should never happen; log to catch bugs
+                print(f"‼️ unexpected band_spectrum length {len(band_spectrum)} != {N_BW_POINTS}")
 
             power_times.append(time.time())
 
             # Downsample for GUI only (e.g., take 1 out of every 500 samples)
             step = max(len(iq) // TARGET_FFT_SIZE, 1)
-            iq_downsampled = iq[::step]
 
+            ch0_downsampled = ch0[::step]
+            ch1_downsampled = ch1[::step]
 
             # Update shared_buffer safely
             with buffer_lock:
                 try:
                     # shared_buffer.put_nowait(iq_downsampled)
-                    shared_buffer.append(iq_downsampled)
+                    shared_buffer[0].append(ch0_downsampled)
+                    shared_buffer[1].append(ch1_downsampled)
+
                 except queue.Full:
                     pass  # Drop the new data instead of blocking
 
 
 
 
-                ####################   DEBUGGING TO SEE IF IQ PARAMS GET MAINTAINED                     ############################################################
+        ####################   DEBUGGING TO SEE IF IQ PARAMS GET MAINTAINED    ############################################################
 
                 # Get DCOFF_I
-
-
-
                 #TODO: uncomment this
 
 
@@ -603,23 +852,29 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
     ########################################################################################################################
 
 
-
-
-
-
-
     # Disable module
     # print("RX: Stop")
-    ch.enable = False
+    # ch.enable = False
+    #
+    #
+    #
+    # if (rx_done != None):
+    #     rx_done.set()
+    #
+    # print("RX: Done")
+    #
+    # return 0
 
 
 
-    if (rx_done != None):
-        rx_done.set()
 
-    print("RX: Done")
+    #TODO: leave ch.enable = True for continuous streaming
 
+    if rx_done != None:
+        rx_done.set() # if some thread is waiting for per-call completion,
+        #TODO: ensure that this flag is set after interrupting the code
     return 0
+
 
 
 # =============================================================================
@@ -627,73 +882,6 @@ def receive(device, channel: int, freq: int, rate: int, gain: int,
 # =============================================================================
 
 
-
-# Set libbladeRF verbosity level
-verbosity = config.get('common', 'libbladerf_verbosity').upper()
-if (verbosity == "VERBOSE"):
-    _bladerf.set_verbosity(0)
-elif (verbosity == "DEBUG"):
-    _bladerf.set_verbosity(1)
-elif (verbosity == "INFO"):
-    _bladerf.set_verbosity(2)
-elif (verbosity == "WARNING"):
-    _bladerf.set_verbosity(3)
-elif (verbosity == "ERROR"):
-    _bladerf.set_verbosity(4)
-elif (verbosity == "CRITICAL"):
-    _bladerf.set_verbosity(5)
-elif (verbosity == "SILENT"):
-    _bladerf.set_verbosity(6)
-else:
-    print("Invalid libbladerf_verbosity specified in configuration file:",
-          verbosity)
-    shutdown(error=-1, board=None)
-
-# =============================================================================
-# BEGIN !!!
-# =============================================================================
-
-uut = probe_bladerf()
-
-if (uut == None):
-    print("No bladeRFs detected. Exiting.")
-    shutdown(error=-1, board=None)
-
-b = _bladerf.BladeRF(uut)
-
-
-
-board_name = b.board_name
-print(board_name)
-fpga_size = b.fpga_size
-
-if (config.getboolean(board_name + '-load-fpga', 'enable')):
-    print("Loading FPGA...")
-    try:
-        status = load_fpga(b, config.get(board_name + '-load-fpga',
-                                         'image_' + str(fpga_size) + 'kle'))
-    except:
-        print("ERROR loading FPGA.")
-        raise
-
-    if (status < 0):
-        print("ERROR loading FPGA.")
-        shutdown(error=status, board=b)
-else:
-    print("Skipping FPGA load due to configuration setting.")
-
-status = print_versions(device=b)
-
-# TODO: can we have >1 rx/tx pool workers because 2x2 MIMO?
-rx_pool = ThreadPool(processes=1)
-tx_pool = ThreadPool(processes=1)
-
-
-
-
-# TODO append to rx data buffer
-# TODO check if rx buffer is full
-# TODO check if main file is full
 
 
 
@@ -715,7 +903,7 @@ def rx_loop():
 
 
         status = receive(
-            device=b,
+            device=my_bladerf,
             channel=rx_ch,
             freq=rx_freq,
             rate=rx_rate,
@@ -756,7 +944,11 @@ if __name__ == "__main__":
 
     # Setup the FFT plot
     fft_plot = win.addPlot(title="FFT of Signal")
-    fft_curve = fft_plot.plot(pen='g')
+    # fft_curve = fft_plot.plot(pen='g')
+
+    # Create two curves: one for each channel, with different colors
+    fft_curve_ch0 = fft_plot.plot(pen='r')  # Channel 0: red
+    fft_curve_ch1 = fft_plot.plot(pen='b')  # Channel 1: blue
 
     # Label axes
     fft_plot.setLabel('bottom', 'Frequency (MHz)')
@@ -768,7 +960,7 @@ if __name__ == "__main__":
     fft_plot.setXRange(center_freq_mhz - bandwidth_mhz / 2,
                        center_freq_mhz + bandwidth_mhz / 2, padding=0)
 
-    fft_plot.setYRange(-100, 0, padding=0)  # dB range — adjust based on your signal
+    fft_plot.setYRange(-100, 10, padding=0)  # dB range — adjust based on your signal
 
     # Add Bandwidth-Summed Power Plot
     win.nextRow()
@@ -795,18 +987,20 @@ if __name__ == "__main__":
     timer.timeout.connect(update_fft_gui)  # <- Connect to your function
     timer.start(500)  # Refresh every 50ms
 
-    b.set_correction(rx_channel, Correction.DCOFF_I, 652) #-880 for 652, -536 for 1000
-    b.set_correction(rx_channel, Correction.DCOFF_Q, -496) #-496 for 502, -1000 for 1000
+    my_bladerf.set_correction(rx_channel, Correction.DCOFF_I, 652) #-880 for 652, -536 for 1000
+    my_bladerf.set_correction(rx_channel, Correction.DCOFF_Q, -496) #-496 for 502, -1000 for 1000
 
     time.sleep(1)
 
 
-    # Start GUI loop (this must stay in the main thread!)
     def clean_shutdown():
         print("Shutting down...")
-        stop_event.set()  # Signal thread to stop
-        b.close()  # Close BladeRF properly
-        app.quit()  # Cleanly close Qt event loop
+        stop_event.set()  # Signal all threads to stop
+        # Disable BladeRF channels before closing
+        my_bladerf.enable_module(_bladerf.CHANNEL_RX(0), False)
+        my_bladerf.enable_module(_bladerf.CHANNEL_RX(1), False)
+        my_bladerf.close()  # Properly close BladeRF device
+        app.quit()  # Cleanly close the Qt event loop
 
 
     # Connect PyQt5 close event
