@@ -17,7 +17,7 @@ from bladerf._bladerf import Correction
 
 
 
-# Add these manually if they're not exposed by your bindings
+#Add these manually if they're not exposed by your bindings
 BLADERF_MODULE_RX = 0
 BLADERF_MODULE_TX = 1
 
@@ -28,12 +28,7 @@ BLADERF_CORR_GAIN = 3
 
 CONCENTRATION_FREQUENCY = 2.4e9
 
-data_of_device = {}
 
-
-
-# Global shutdown flag
-stop_event = threading.Event()
 
 current_datetime = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')  # Format: "YYYY-MM-DD_HH-MM-SS"
 bw_file_path = f"./logs/bw_summing_data_{current_datetime}.bin"
@@ -72,7 +67,7 @@ exposure_stack_count = 0
 
 
 # Initialize buffers somewhere globally or in class:
-bw_powers = deque(maxlen=1000)
+bw_powers = deque(maxlen=1000) #TODO: check whether 100 is an overdo here....
 power_times = deque(maxlen=1000)
 INTEGRATION_TIME = 10.0  # seconds per integration block
 integration_start = time.time()
@@ -93,7 +88,7 @@ class BladeRFController:
     Encapsulates BladeRF initialization, FPGA loading, version reporting, and threading setup.
     """
 
-    def __init__(self, config_path="my_stuff/my_configuration.ini"):
+    def __init__(self, config_path="/all_parameters.ini"):
         self.config_path = config_path
         self.config = ConfigParser()
         self.config.read(self.config_path)
@@ -109,8 +104,17 @@ class BladeRFController:
         self.rx_channel0 = None
         self.rx_channel1 = None
 
+        #TODO: perhaps it would be better to initialize everything in the cosntructor, as some attributes may not be visible in the code, if the respective objects are declared in the "dict_init" def.... !!!!
+        self.write_queue = {device: queue.Queue(maxsize=50) for device in self.devices}
+
+        # Initialize a log filename per device
+        self.log_file = {}  # dictionary to hold file paths per device
+
+
+
         # Call main initialization
         self._initialize_device()
+        self._initialize_dictionaries()
 
         rxfiles = [
             "rx_device0.bin",
@@ -118,8 +122,15 @@ class BladeRFController:
             "rx_device2.bin"
         ] #TODO where do i move this shit?
 
+        # self.rx_pool = [ThreadPool(processes=1) for _ in self.boards]
+
+        # TODO: check whether the thread pool is necessary, perhaps unusable.
+        # TODO: perhaps we need to do pool.close or pool.join -> investigate!!!
+
     # ──────────────── Main initializer ────────────────
     def _initialize_device(self):
+
+
         """Runs the full initialization sequence."""
         self._set_verbosity()
         self.devices = self._probe_bladerf()
@@ -146,12 +157,43 @@ class BladeRFController:
 
         # Thread pools (for RX/TX)
         # Only RX tasks
-        # self.rx_pool = [ThreadPool(processes=1) for _ in self.boards]
 
-        #TODO: check whether the thread pool is necessary, perhaps unusable.
-        #TODO: perhaps we need to do pool.close or pool.join -> investigate!!!
+        for device in self.devices:
+            self.log_file[device] = f"./logs/{device}.bin"
+            # Optional: create/truncate the file at initialization
+            with open(self.log_file[device], 'wb') as f:
+                pass  # just create an empty file
 
+
+
+
+
+    def _initialize_dictionaries(self, devices):
+        global buffer_lock, shared_buffer
+
+        # TODO: where should i move all these initializations?
         # self.tx_pool = ThreadPool(processes=1)
+        # Initialize per-device locks and buffers
+        buffer_lock = {}  # Will hold a Lock per device
+        shared_buffer = {}  # Will hold a deque per channel per device
+
+        for device in devices:  # devices is a list of device identifiers
+            buffer_lock[device] = threading.Lock()
+            shared_buffer[device] = {
+                0: deque(maxlen=10),  # RX channel 0
+                1: deque(maxlen=10),  # RX channel 1
+            }
+
+        data_of_device = {}
+
+        # Bounded queue to hold data to write
+        #TODO: find out what the maxsize should be for this!!!!!!!!!! ---------------------------------------------- SOS !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+        # Global shutdown flag
+        stop_event = threading.Event()
+
+
 
     # ──────────────── Verbosity ────────────────
     def _set_verbosity(self):
@@ -167,6 +209,7 @@ class BladeRFController:
 
     # ──────────────── Probe ────────────────
     def _probe_bladerf(self):
+
         """Return a list of available BladeRF devices."""
         print("Searching for BladeRF devices...")
         try:
@@ -428,44 +471,199 @@ class BladeRFController:
         num_samples_interleaved = num_samples_per_buffer // 2
         buf = bytearray(num_samples_per_buffer * bytes_per_sample)
         num_samples_read = 0
-        with open(rxfile, 'ab') as outfile:
-            while not stop_event.is_set():
-                if num_samples > 0 and num_samples_read == num_samples:
-                    break
-                elif num_samples > 0:
-                    print(f"len buf =={len(buf)}")  # this prints (bytes_per_sample * num_samples_per_buffer)
-                    num = min(len(buf) // bytes_per_sample,
-                              num_samples - num_samples_read)
-                    if (num_samples - num_samples_read) < (len(buf) // bytes_per_sample):
-                        print(f"Found it: num_samples - num_samples_read === {num_samples - num_samples_read}")
-                    else:
-                        print(f"Other Case (usual), len(buf) // bytes_per_sample === {len(buf) // bytes_per_sample}")
+
+        while not stop_event.is_set():
+            if num_samples > 0 and num_samples_read == num_samples:
+                break
+            elif num_samples > 0:
+                print(f"len buf =={len(buf)}")  # this prints (bytes_per_sample * num_samples_per_buffer)
+                num = min(len(buf) // bytes_per_sample,
+                          num_samples - num_samples_read)
+                if (num_samples - num_samples_read) < (len(buf) // bytes_per_sample):
+                    print(f"Found it: num_samples - num_samples_read === {num_samples - num_samples_read}")
                 else:
-                    print("What? Num_samples < 0 ????? how can that happen?? Num_samples is: ", num_samples)
-                    num = len(buf) // bytes_per_sample
+                    print(f"Other Case (usual), len(buf) // bytes_per_sample === {len(buf) // bytes_per_sample}")
+            else:
+                print("What? Num_samples < 0 ????? how can that happen?? Num_samples is: ", num_samples)
+                num = len(buf) // bytes_per_sample
 
-                # Receive samples into the buffer
-                device.sync_rx(buffer, num)
+            # Receive samples into the buffer
+            device.sync_rx(buffer, num)
 
-                # This keeps track of how many samples have been read so far.
-                num_samples_read += num
+            # This keeps track of how many samples have been read so far.
+            num_samples_read += num
 
-                # Write to file main "all-inclusive" I-Q data file
-                outfile.write(buffer[:num * bytes_per_sample])
+            # Make an immutable copy of buffer for safe passing
+            raw_copy = bytes(buf[:num_samples_per_buffer * bytes_per_sample])
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
 
-                # buf[:num * bytes_per_sample]: a slice of the buffer that includes only the valid portion
-                # (i.e. just the bytes that were filled with new data).
+            # Push to writer queue (blocks if queue is full)
+            self.write_queue.put((timestamp, raw_copy))
 
-                # converts the raw byte data in buf into 16-bit integers, representing the received signal samples (I/Q data).
-                data_of_device[device] = np.frombuffer(buf[:num * bytes_per_sample], dtype=np.int16)
 
-    def _data_handler(self):
+
+            # Write to file main "all-inclusive" I-Q data file
+            # outfile.write(buffer[:num * bytes_per_sample])
+
+            # buf[:num * bytes_per_sample]: a slice of the buffer that includes only the valid portion
+            # (i.e. just the bytes that were filled with new data).
+
+            # converts the raw byte data in buf into 16-bit integers, representing the received signal samples (I/Q data).
+            # raw_copy = bytes(buf[:num * bytes_per_sample])  # immutable copy of bytes
+            data_of_device[device] = np.frombuffer(raw_copy, dtype=np.int16).copy()  # or just store raw_copy and convert later
+            #important: frombuffer does not copy the data, it just interprets the memory. Normally, that’s fine—but np.frombuffer creates a read-only view if the underlying buffer is immutable (as in bytes).
+            #.copy: Forces NumPy to allocate a new, writable array in memory.
+            #In Python, bytes() creates an immutable copy of the data you give it.
+
+            # If you do bytes(buf[:n]) where buf is a bytearray, it returns a new bytes object containing the same bytes, but you cannot change it afterwards (unlike a bytearray, which is mutable).
+            #
+            # This is exactly why we use it here: it prevents the RX thread from accidentally overwriting the data while another thread (FFT or plotting) is reading it.
+
+            # inside class BladeRFController
+
+    def writer_thread_fn(self, device):
+        """
+        Dedicated writer thread method (instance method).
+        Consumes items from self.write_queue with the form:
+            (device_id, timestamp_str, raw_bytes)
+        Writes appending to per-device files under ./logs.
+        Drains the queue after stop_event is set, then exits.
+        """
+        # Ensure logs dir exists
+        # os.makedirs("logs", exist_ok=True)
+
+        # Continue while not asked to stop OR while there are still items to write
+        while not (self.stop_event.is_set() and self.write_queue[device].empty()):
+            try: #TODO: check if "self.write_queue[device].get(timeout=0.5)" is correct!
+                device, timestamp, raw_bytes = self.write_queue[device].get(timeout=0.5) #TODO: timeout is an unexpected argument, also
+            except queue.Empty:
+                # no item available right now -> loop and re-check stop condition
+                continue
+
+            try:
+                # Build a stable filename per device/session. timestamp expected to be a string.
+                # If you'd rather keep one rolling file per device, change this to f"./logs/{device}.bin"
+
+                # Use 'ab' to append raw bytes. If multiple runs use the same timestamp you may
+                # want to avoid collisions (e.g. include a session id).
+                with open(self.log_file[device], 'ab') as f:
+                    # raw_bytes should already be bytes or a bytes-like object
+                    f.write(raw_bytes)
+            except Exception as e:
+                # Log error but keep going; disk write errors shouldn't kill the writer thread
+                print(f"[writer] Error writing to {self.log_file[device]}: {e}")
+            # finally:
+            #     # Mark the item done so queue.join() will work
+            #     try:
+            #         self.write_queue.task_done()
+            #     except Exception:
+            #         pass
+
+        # When we exit the loop, everything enqueued has been processed (or stop was requested
+        # and the queue drained). Clean exit.
+        # Optional: print a short message for debugging
+        print("Writer thread exiting - queue drained.")
+
+    def _data_handler(self, device):
+        """
+        Processes the raw I/Q data from a device:
+        - Deinterleaves channels
+        - Computes complex I/Q arrays
+        - Computes FFT in both linear and dB scales
+        - Returns results as a dictionary keyed by device
+        """
+
         global data_of_device
 
+        # Check if we have data for this device
+        if device not in data_of_device or len(data_of_device[device]) == 0:
+            print("Device {} not found, or sth else idk")
+            return None
+
+        fs = int(config.getfloat('[bladerf2-rx]', 'rx_samplerate'))
+        center_freq_hz = int(config.getfloat('[bladerf2-rx]', 'rx_frequency'))
+
+        # ---- Deinterleave [I0,Q0,I1,Q1,...] ----
+        raw = data_of_device[device]
+        i0 = raw[0::4].astype(np.float32) #TODO: search whether this is better than int16, float64 etc....
+        q0 = raw[1::4].astype(np.float32)
+        i1 = raw[2::4].astype(np.float32)
+        q1 = raw[3::4].astype(np.float32)
+
+        # Complex arrays per channel
+        ch0 = i0 + 1j * q0
+        ch1 = i1 + 1j * q1
+
+        # Full interleaved IQ for FFT
+        iq = raw[::2].astype(np.float32) + 1j * raw[1::2].astype(np.float32)
+
+        results = {}
+
+        # ---------------- Approach 1: Linear FFT (for computation/integration) ----------------
+        window = np.hanning(len(iq))
+        iq_windowed = iq * window
+        norm_factor = np.sum(window) / len(window)
+
+        fft_vals_linear = np.fft.fftshift(np.fft.fft(iq_windowed))
+        fft_vals_linear /= (len(iq) * norm_factor)
+        power_spectrum = np.abs(fft_vals_linear) ** 2
+
+        freqs = np.fft.fftshift(np.fft.fftfreq(len(iq), 1 / fs))
+        freqs_abs = freqs + center_freq_hz  # absolute frequency axis
+
+        # Select only BW for summing (around center frequency)
+        half_bw = int(config.getfloat('BW-Summing', 'BW_FOR_BW_SUMMING')) / 2
+        valid_indices = np.where(
+            (freqs_abs >= center_freq_hz - half_bw) &
+            (freqs_abs <= center_freq_hz + half_bw)
+        )[0]
+
+        results['linear_fft'] = fft_vals_linear
+        results['power_spectrum'] = power_spectrum
+        results['freqs'] = freqs_abs
+        results['valid_indices'] = valid_indices
+
+        # ---------------- Approach 2: FFT in dB scale (for plotting) ----------------
+        buffer = iq.copy()  # reuse IQ array
+        buffer -= np.mean(buffer)  # remove DC offset
+        window = np.hanning(len(buffer))
+        buffer_windowed = buffer * window
+        buffer_windowed -= np.mean(buffer_windowed)  # optional extra DC removal
+
+        normalization_factor = np.sum(window) / len(window)
+        fft_vals = np.fft.fftshift(np.fft.fft(buffer_windowed))
+        fft_vals /= (len(buffer) * normalization_factor)
+        fft_db = 20 * np.log10(np.abs(fft_vals) + 1e-12)  # dB scale
+
+        results['fft_db'] = fft_db
+
+        # Optionally, downsample for plotting to save CPU
+        downsample_factor = max(1, len(fft_db) // 1024)  # keep ~1024 points for real-time plotting
+        results['fft_db_plot'] = fft_db[::downsample_factor]
+        results['freqs_plot'] = freqs_abs[::downsample_factor]
 
 
+        # ------------- "Approach" 3 ==> GUI FFT downsampling -----------------------------
 
-    def start_rx_threads(self, devices, buffer, num_samples, stop_event, rxfiles):
+        # Downsample for GUI only (e.g., take 1 out of every 500 samples)
+        step = max(len(iq) // int(config.getfloat('FFT-Parameters', 'TARGET_FFT_SIZE')), 1)
+
+        ch0_downsampled = ch0[::step]
+        ch1_downsampled = ch1[::step]
+
+        # Update shared_buffer safely
+        with buffer_lock[device]:
+            try:
+                # shared_buffer.put_nowait(iq_downsampled)
+                shared_buffer[device][0].append(ch0_downsampled)
+                shared_buffer[device][1].append(ch1_downsampled)
+
+            except queue.Full:
+                pass  # Drop the new data instead of blocking
+
+        return results
+
+    def start_threads(self, devices, buffer, num_samples, stop_event, rxfiles):
         """
         Launch separate threads to receive data from multiple BladeRF devices simultaneously.
         """
