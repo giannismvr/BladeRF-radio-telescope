@@ -16,68 +16,6 @@ from collections import deque
 from bladerf._bladerf import Correction
 from typing import Optional
 
-from kdasyra_debugging import stop_event
-
-#Add these manually if they're not exposed by your bindings
-BLADERF_MODULE_RX = 0
-BLADERF_MODULE_TX = 1
-
-BLADERF_CORR_DC_I = 0
-BLADERF_CORR_DC_Q = 1
-BLADERF_CORR_PHASE = 2
-BLADERF_CORR_GAIN = 3
-
-CONCENTRATION_FREQUENCY = 2.4e9
-
-
-
-current_datetime = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')  # Format: "YYYY-MM-DD_HH-MM-SS"
-bw_file_path = f"./logs/bw_summing_data_{current_datetime}.bin"
-stacked_file_path = f"./logs/exposure_stacking_data_{current_datetime}.bin"
-
-# Bandwidth summing queue (optional) and stacking memory
-stacked_powers = []    # Sliding window or average of power
-
-
-# Defines BW for bw summing
-BW_FOR_BW_SUMMING = 10e6  # for example, 2 MHz
-
-POWER_WINDOW = 100     # Number of points to retain in stacked plot
-
-# Load configuration
-config = ConfigParser()
-config.read('my_stuff/my_configuration.ini')
-
-
-
-prev_fft_db = None
-alpha = 1  # Smoothing factor, adjust as needed
-# The smoothing factor controls how much the new FFT data affects the plot.
-# 	•	If alpha = 1.0: you show only the new FFT (no smoothing).
-# 	•	If alpha = 0.0: you show only the old plot (fully frozen).
-# 	•	If alpha = 0.2: you blend 20% of the new FFT with 80% of the previous plot.
-#
-# It reduces flickering by slowing down how fast the display reacts to small changes.
-
-
-#---------------- more bloat parameters ----------------------------------------
-
-
-exposure_stack_sum = None
-exposure_stack_count = 0
-
-
-# Initialize buffers somewhere globally or in class:
-bw_powers = deque(maxlen=1000) #TODO: check whether 100 is an overdo here....
-power_times = deque(maxlen=1000)
-INTEGRATION_TIME = 10.0  # seconds per integration block
-integration_start = time.time()
-save_dir = "bw_spectra"  # directory to save spectra files
-os.makedirs(save_dir, exist_ok=True)
-
-
-
-
 
 #------------------------- MAIN CLASS --------------------------------------------------------------------
 
@@ -89,7 +27,7 @@ class BladeRFController:
     Encapsulates BladeRF initialization, FPGA loading, version reporting, and threading setup.
     """
 
-    def __init__(self, config_path="/all_parameters.ini"):
+    def __init__(self, config_path="/all_parameters.ini", calc_ch0 = False, calc_ch1 = False, calc_ch0_ch1 = True):
         self.config_path = config_path
         self.config = ConfigParser()
         self.config.read(self.config_path)
@@ -105,7 +43,7 @@ class BladeRFController:
         self.rx_channel0 = None
         self.rx_channel1 = None
 
-        #TODO: perhaps it would be better to initialize everything in the cosntructor, as some attributes may not be visible in the code, if the respective objects are declared in the "dict_init" def.... !!!!
+        #TODO: perhaps it would be better to initialize everything in the constructor, as some attributes may not be visible in the code, if the respective objects are declared in the "dict_init" def.... !!!!
         self.write_queue = {}
         self.data_of_device = {}
 
@@ -120,18 +58,26 @@ class BladeRFController:
         self.plot_timer = QtCore.QTimer()
 
 
-        self.calc_ch0 = False
-        self.calc_ch1 = False
-        self.calc_ch0_ch1 = True  # main use case
+        self.calc_ch0 = calc_ch0
+        self.calc_ch1 = calc_ch1
+        self.calc_ch0_ch1 = calc_ch0_ch1
 
         self.results = {}
 
         self.calculation = {}
 
-        self.fft_curves = {}
+        self.num_samples = []
 
-        # Store the frequency axis for each device
-        self.last_freqs = {device: np.array([]) for device in self.devices}
+        self.my_bladerf = []
+
+        self.config_path = 'all_parameters.ini'
+
+        self.config = ConfigParser()
+        self.config.read(self.config_path)
+
+
+
+
 
 
 
@@ -142,17 +88,32 @@ class BladeRFController:
 
         self.device_plots = {}  # store PlotWidget and curves per device
 
+        self.config_path = config_path
+        self.bytes_per_sample = int(self.config.getfloat('bladerf2-rx', 'bytes_per_sample')) # 2 bytes I + 2 bytes Q == 4 bytes for 1 channel, so for 2 channels, it will be 2*that = 2* 4 =8
+        self.gain = int(self.config.getfloat('bladerf2-rx', 'rx_gain'))
+        self.rate = int(self.config.getfloat('bladerf2-rx', 'rx_samplerate'))
+        self.freq = int(self.config.getfloat('bladerf2-rx', 'rx_frequency'))
 
 
         # Call main initialization
+        #TODO: check if this is the correct sequence for initialization
+
         self._initialize_device()
         self._initialize_dictionaries()
+        self._set_verbosity()
+        uut = self._probe_bladerf()
+        for idx in range(len(uut)):
+            self.my_bladerf[idx] = _bladerf.BladeRF(uut[idx])
+        self._print_board_info(self.my_bladerf)
+        self._load_fpga_if_enabled(self.my_bladerf)
+        self._configure_rx_parameters()
 
-        rxfiles = [
-            "rx_device0.bin",
-            "rx_device1.bin",
-            "rx_device2.bin"
-        ] #TODO where do i move this shit?
+        self.start_threads(self.devices)
+
+
+
+
+
 
         # self.rx_pool = [ThreadPool(processes=1) for _ in self.boards]
 
@@ -243,6 +204,13 @@ class BladeRFController:
                                  "CH1": queue.Queue(maxsize=10),
                                  "CH0+CH1": queue.Queue(maxsize=10)}
 
+        # Store the frequency axis for each device
+        self.last_freqs = {device: np.array([]) for device in self.devices}
+
+        for device in self.devices:
+            self.num_samples[device] = int(self.config.getfloat('bladerf2-rx', 'rx_num_samples'))
+
+
 
 
 
@@ -284,43 +252,49 @@ class BladeRFController:
 
 
     # ──────────────── Board info ────────────────
-    def _print_board_info(self, board):
-        try:
-            print("Board name:", board.board_name)
-            print("Firmware version:", board.get_fw_version())
-            print("FPGA version:", board.get_fpga_version())
-        except Exception as e:
-            print(f"Error reading board info for {board}: {e}")
+    def _print_board_info(self, bladerf_object_list):
+        """
+        Print board information for a list of BladeRF devices.
+        """
+        for i, board in enumerate(bladerf_object_list):
+            print(f"\n=== Device {i}: {board} ===")
+            try:
+                print("Board name:       ", board.board_name)
+                print("Firmware version: ", board.get_fw_version())
+                print("FPGA version:     ", board.get_fpga_version())
+            except Exception as e:
+                print(f"Error reading board info for device {i}: {e}")
 
 
 
     # ──────────────── FPGA load ────────────────
-    def _load_fpga_if_enabled(self, board):
-        """Load FPGA image if the configuration enables it."""
-        board_name = board.board_name
-        enabled = self.config.getboolean(f"{board_name}-load-fpga", 'enable')
-        if not enabled:
-            print(f"Skipping FPGA load per config, for board: {board_name} ")
-            return
+    def _load_fpga_if_enabled(self, bladerf_object_list):
+        """Load FPGA image(s) if the configuration enables it."""
+        for board in bladerf_object_list:
+            board_name = board.board_name
+            enabled = self.config.getboolean(f"{board_name}-load-fpga", 'enable')
+            if not enabled:
+                print(f"Skipping FPGA load per config, for board: {board_name} ")
+                continue
 
-        fpga_size = board.fpga_size
-        image_path = self.config.get(f"{board_name}-load-fpga", f"image_{fpga_size}kle")
-        image_path = os.path.abspath(image_path)
-        if not os.path.exists(image_path):
-            print("FPGA image does not exist:", image_path)
-            self.shutdown(-1)
-
-        try:
-            print("Loading FPGA:", image_path)
-            board.load_fpga(image_path)
-            if board.is_fpga_configured():
-                print("FPGA loaded successfully. Version:", board.get_fpga_version())
-            else:
-                print("FPGA load failed.")
+            fpga_size = board.fpga_size
+            image_path = self.config.get(f"{board_name}-load-fpga", f"image_{fpga_size}kle")
+            image_path = os.path.abspath(image_path)
+            if not os.path.exists(image_path):
+                print("FPGA image does not exist:", image_path)
                 self.shutdown(-1)
-        except _bladerf.BladeRFError as e:
-            print("Error loading FPGA:", e)
-            self.shutdown(-1)
+
+            try:
+                print("Loading FPGA:", image_path)
+                board.load_fpga(image_path)
+                if board.is_fpga_configured():
+                    print("FPGA loaded successfully. Version:", board.get_fpga_version())
+                else:
+                    print("FPGA load failed.")
+                    self.shutdown(-1)
+            except _bladerf.BladeRFError as e:
+                print("Error loading FPGA:", e)
+                self.shutdown(-1)
 
     # ──────────────── Shutdown ────────────────
     def shutdown(self, error=0):
@@ -338,38 +312,31 @@ class BladeRFController:
 
     def _configure_rx_parameters(
             self,
-            rxfile: str,  # required
-            freq: int,
-            rate: int,
-            gain: int,
-            num_samples: int,
-            tx_start=None,
-            rx_done=None
     ):
 
 
 
-        for idx, device_current in enumerate(self.devices):
-            dcoff_i = _bladerf.ffi.new("int16_t *")
-            ret_i = _bladerf.libbladeRF.bladerf_get_correction(device_current.dev[0], BLADERF_MODULE_RX, BLADERF_CORR_DC_I,
-                                                               dcoff_i)
-
-            dcoff_q = _bladerf.ffi.new("int16_t *")
-            ret_q = _bladerf.libbladeRF.bladerf_get_correction(device_current.dev[0], BLADERF_MODULE_RX, BLADERF_CORR_DC_Q,
-                                                               dcoff_q)
-
-            if ret_i == 0 and ret_q == 0:
-                print(f"[Device {idx}] DCOFF_I = {dcoff_i[0]}, DCOFF_Q = {dcoff_q[0]}")
-            else:
-                print(f"[Device {idx}] Failed to get correction values: ret_i={ret_i}, ret_q={ret_q}")
+        # for idx, device_current in enumerate(self.devices): #TODO: uncomment and fix appropriately
+        #     dcoff_i = _bladerf.ffi.new("int16_t *")
+        #     ret_i = _bladerf.libbladeRF.bladerf_get_correction(device_current.dev[0], BLADERF_MODULE_RX, BLADERF_CORR_DC_I,
+        #                                                        dcoff_i)
+        #
+        #     dcoff_q = _bladerf.ffi.new("int16_t *")
+        #     ret_q = _bladerf.libbladeRF.bladerf_get_correction(device_current.dev[0], BLADERF_MODULE_RX, BLADERF_CORR_DC_Q,
+        #                                                        dcoff_q)
+        #
+        #     if ret_i == 0 and ret_q == 0:
+        #         print(f"[Device {idx}] DCOFF_I = {dcoff_i[0]}, DCOFF_Q = {dcoff_q[0]}")
+        #     else:
+        #         print(f"[Device {idx}] Failed to get correction values: ret_i={ret_i}, ret_q={ret_q}")
 
         for board_idx, board in enumerate(self.boards):
             for ch_index in [0, 1]:  # RX channels
                 ch = board.Channel(ch_index)  # create channel object
-                ch.frequency = freq
-                ch.sample_rate = rate
-                ch.gain = gain
-            print(f"[{board.board_name}] RX channels configured: freq={freq}, rate={rate}, gain={gain}")
+                ch.frequency = self.freq
+                ch.sample_rate = self.rate
+                ch.gain = self.gain
+            print(f"[{board.board_name}] RX channels configured: freq={self.freq}, rate={self.rate}, gain={self.gain}")
 
         # TODO: this must be done after the gain, freq settings (eg ch.gain = ....)
         for board in self.boards:
@@ -391,7 +358,7 @@ class BladeRFController:
 
         # Setup synchronous stream
         # 8 bytes total per interleaved complex sample pair (CH0 + CH1).
-        bytes_per_sample = 4 * 2  # 2 bytes I + 2 bytes Q == 4 bytes for 1 channel, so for 2 channels, it will be 2*that
+        bytes_per_sample = 4 * 2  # 2 bytes I + 2 bytes Q == 4 bytes for 1 channel, so for 2 channels, it will be 2*that = 2* 4 =8
         num_samples_per_buffer = 8192 * 2  # total samples (I+Q pairs), shared across RX0 and RX1, NOT INTERLEAVED
         num_samples_interleaved = num_samples_per_buffer // 2
         # buffer = {}  # dictionary to hold buffers per device
@@ -508,33 +475,33 @@ class BladeRFController:
 
 
 
-    def rx_worker(self, device, buffer, num_samples, stop_event, rxfile):
+    def rx_worker(self, device):
         """
         Worker function for receiving data from a single BladeRF device.
         """
 
 
 
-        bytes_per_sample = 4 * 2  # 2 bytes I + 2 bytes Q == 4 bytes for 1 channel, so for 2 channels, it will be 2*that
+        # bytes_per_sample = 4 * 2  # 2 bytes I + 2 bytes Q == 4 bytes for 1 channel, so for 2 channels, it will be 2*that
         num_samples_per_buffer = 8192 * 2  # total samples (I+Q pairs), shared across RX0 and RX1, NOT INTERLEAVED
         num_samples_interleaved = num_samples_per_buffer // 2
-        buf = bytearray(num_samples_per_buffer * bytes_per_sample)
+        buf = bytearray(num_samples_per_buffer * self.bytes_per_sample)
         num_samples_read = 0
 
-        while not stop_event.is_set():
-            if num_samples > 0 and num_samples_read == num_samples:
+        while not self.stop_event.is_set():
+            if self.num_samples[device] > 0 and num_samples_read == self.num_samples:
                 break
-            elif num_samples > 0:
+            elif self.num_samples > 0:
                 print(f"len buf =={len(buf)}")  # this prints (bytes_per_sample * num_samples_per_buffer)
-                num = min(len(buf) // bytes_per_sample,
-                          num_samples - num_samples_read)
-                if (num_samples - num_samples_read) < (len(buf) // bytes_per_sample):
-                    print(f"Found it: num_samples - num_samples_read === {num_samples - num_samples_read}")
+                num = min(len(buf) // self.bytes_per_sample,
+                          self.num_samples[device] - num_samples_read)
+                if (self.num_samples[device] - num_samples_read) < (len(buf) // self.bytes_per_sample):
+                    print(f"Found it: num_samples - num_samples_read === {self.num_samples[device] - num_samples_read}")
                 else:
-                    print(f"Other Case (usual), len(buf) // bytes_per_sample === {len(buf) // bytes_per_sample}")
+                    print(f"Other Case (usual), len(buf) // bytes_per_sample === {len(buf) // self.bytes_per_sample}")
             else:
-                print("What? Num_samples < 0 ????? how can that happen?? Num_samples is: ", num_samples)
-                num = len(buf) // bytes_per_sample
+                print("What? Num_samples < 0 ????? how can that happen?? Num_samples is: ", self.num_samples)
+                num = len(buf) // self.bytes_per_sample
 
             # Receive samples into the buffer
             device.sync_rx(buf, num)
@@ -543,7 +510,7 @@ class BladeRFController:
             num_samples_read += num
 
             # Make an immutable copy of buffer for safe passing
-            raw_copy = bytes(buf[:num_samples_per_buffer * bytes_per_sample])
+            raw_copy = bytes(buf[:num_samples_per_buffer * self.bytes_per_sample])
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
 
             try:
@@ -638,7 +605,7 @@ class BladeRFController:
         - Computes FFT in both linear and dB scales
         - Returns results as a dictionary keyed by device
         """
-        while not stop_event.is_set():
+        while not self.stop_event.is_set():
 
             fft_results = {}
 
@@ -796,8 +763,6 @@ class BladeRFController:
                     pass  # Drop new data instead of blocking
 
 
-
-
     def start_plot_thread(self):
         """
         Creates 1 plot per device, 3 curves per plot (CH0, CH1, CH0+CH1),
@@ -850,19 +815,20 @@ class BladeRFController:
                     if freqs is not None:
                         fft_curve.setData(freqs / 1e6, latest_fft)  # MHz
 
-    def start_threads(self, devices, buffer, num_samples, rxfiles):
+    def start_threads(self, devices):
         """
         Launch separate threads to receive data from multiple BladeRF devices simultaneously,
         plus a single plot timer thread.
         """
         rx_threads = []
         data_threads = []
+        writer_threads = []
 
         for i, device in enumerate(devices):
             # RX worker thread
             t_rx = threading.Thread(
                 target=self.rx_worker,
-                args=(device, buffer[i], num_samples, self.stop_event, rxfiles[i]),
+                args=(device),
                 daemon=True
             )
             t_rx.start()
@@ -877,10 +843,21 @@ class BladeRFController:
             t_data.start()
             data_threads.append(t_data)
 
+            # Writer thread (consumes self.write_queue[device] and writes to disk)
+            t_writer = threading.Thread(
+                target=self.writer_thread_fn,
+                args=(device,),
+                daemon=True
+            )
+            t_writer.start()
+            writer_threads.append(t_writer)
+
+
+
         # Start plot timer (Qt-safe)
         self.start_plot_thread()
 
-        return rx_threads, data_threads
+        return rx_threads, data_threads, writer_threads
 
     def _set_transceiver_parameters(self):
         """ Set RX/TX parameters """
@@ -892,3 +869,7 @@ class BladeRFController:
         """ I am not sure about those yet """
 
 
+
+if __name__ == "__main__":
+    trial = BladeRFController
+    time.sleep(100000)
