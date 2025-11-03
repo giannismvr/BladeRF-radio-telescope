@@ -14,8 +14,9 @@ from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 from collections import deque
 from bladerf._bladerf import Correction
+from typing import Optional
 
-
+from kdasyra_debugging import stop_event
 
 #Add these manually if they're not exposed by your bindings
 BLADERF_MODULE_RX = 0
@@ -96,7 +97,7 @@ class BladeRFController:
         self.boards = []
         self.tx_pool = None
         self.rx_pool = None
-        self.stop_event = threading.Event()
+
         self.rx_num_samples = None
         self.BW = None
         self.fs = None
@@ -105,10 +106,41 @@ class BladeRFController:
         self.rx_channel1 = None
 
         #TODO: perhaps it would be better to initialize everything in the cosntructor, as some attributes may not be visible in the code, if the respective objects are declared in the "dict_init" def.... !!!!
-        self.write_queue = {device: queue.Queue(maxsize=50) for device in self.devices}
+        self.write_queue = {}
+        self.data_of_device = {}
 
         # Initialize a log filename per device
         self.log_file = {}  # dictionary to hold file paths per device
+        self.error_logs = {}
+
+        self.buffer_lock = {}
+        self.shared_buffer = {}
+
+        self.stop_event = threading.Event()
+        self.plot_timer = QtCore.QTimer()
+
+
+        self.calc_ch0 = False
+        self.calc_ch1 = False
+        self.calc_ch0_ch1 = True  # main use case
+
+        self.results = {}
+
+        self.calculation = {}
+
+        self.fft_curves = {}
+
+        # Store the frequency axis for each device
+        self.last_freqs = {device: np.array([]) for device in self.devices}
+
+
+
+
+        self.fft_curves = {}  # Store pyqtgraph curves per device & mode
+        self.prev_fft_db = {}  # Store previous FFT for smoothing
+        self.alpha = 0.3  # smoothing factor
+
+        self.device_plots = {}  # store PlotWidget and curves per device
 
 
 
@@ -158,6 +190,35 @@ class BladeRFController:
         # Thread pools (for RX/TX)
         # Only RX tasks
 
+
+
+
+
+
+
+    def _initialize_dictionaries(self):
+
+
+        # TODO: where should i move all these initializations?
+        # self.tx_pool = ThreadPool(processes=1)
+        # Initialize per-device locks and buffers
+
+
+        for device in self.devices:  # devices is a list of device identifiers
+            self.buffer_lock[device] = threading.Lock()
+            self.shared_buffer[device] = {
+                0: deque(maxlen=10),  # RX channel 0
+                1: deque(maxlen=10),  # RX channel 1
+            }
+
+
+
+        # Bounded queue to hold data to write
+        #TODO: find out what the maxsize should be for this!!!!!!!!!! ---------------------------------------------- SOS !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+
+
         for device in self.devices:
             self.log_file[device] = f"./logs/{device}.bin"
             # Optional: create/truncate the file at initialization
@@ -165,33 +226,24 @@ class BladeRFController:
                 pass  # just create an empty file
 
 
+        for device in self.devices:
+            self.error_logs[device] = f"./error_logs/{device}.bin"
+            # Optional: create/truncate the file at initialization
+            with open(self.error_logs[device], 'wb') as f:
+                pass  # just create an empty file
+
+        for device in self.devices:
+            self.write_queue[device] = queue.Queue(maxsize=200)
+        for device in self.devices:
+            self.data_of_device[device] = queue.Queue(maxsize=200)
+
+        for device in self.devices:
+            self.prev_fft_db[device] = {"CH0": None, "CH1": None, "CH0+CH1": None}
+            self.results[device] = {"CH0": queue.Queue(maxsize=10),
+                                 "CH1": queue.Queue(maxsize=10),
+                                 "CH0+CH1": queue.Queue(maxsize=10)}
 
 
-
-    def _initialize_dictionaries(self, devices):
-        global buffer_lock, shared_buffer
-
-        # TODO: where should i move all these initializations?
-        # self.tx_pool = ThreadPool(processes=1)
-        # Initialize per-device locks and buffers
-        buffer_lock = {}  # Will hold a Lock per device
-        shared_buffer = {}  # Will hold a deque per channel per device
-
-        for device in devices:  # devices is a list of device identifiers
-            buffer_lock[device] = threading.Lock()
-            shared_buffer[device] = {
-                0: deque(maxlen=10),  # RX channel 0
-                1: deque(maxlen=10),  # RX channel 1
-            }
-
-        data_of_device = {}
-
-        # Bounded queue to hold data to write
-        #TODO: find out what the maxsize should be for this!!!!!!!!!! ---------------------------------------------- SOS !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-        # Global shutdown flag
-        stop_event = threading.Event()
 
 
 
@@ -280,15 +332,12 @@ class BladeRFController:
             except Exception:
                 pass
 
-        for pool in self.rx_pool:
-            pool.close()
-            pool.join()
+
 
         sys.exit(error)
 
-    def _cofigure_rx_parameters(
+    def _configure_rx_parameters(
             self,
-            devices,  # required
             rxfile: str,  # required
             freq: int,
             rate: int,
@@ -298,9 +347,9 @@ class BladeRFController:
             rx_done=None
     ):
 
-        global shared_buffer, buffer_lock  # Access the global buffer
 
-        for idx, device_current in enumerate(devices):
+
+        for idx, device_current in enumerate(self.devices):
             dcoff_i = _bladerf.ffi.new("int16_t *")
             ret_i = _bladerf.libbladeRF.bladerf_get_correction(device_current.dev[0], BLADERF_MODULE_RX, BLADERF_CORR_DC_I,
                                                                dcoff_i)
@@ -345,10 +394,10 @@ class BladeRFController:
         bytes_per_sample = 4 * 2  # 2 bytes I + 2 bytes Q == 4 bytes for 1 channel, so for 2 channels, it will be 2*that
         num_samples_per_buffer = 8192 * 2  # total samples (I+Q pairs), shared across RX0 and RX1, NOT INTERLEAVED
         num_samples_interleaved = num_samples_per_buffer // 2
-        buffer = {}  # dictionary to hold buffers per device
-        for i, device in enumerate(devices):
-            buffer[i] = bytearray(num_samples_per_buffer * bytes_per_sample)
-        num_samples_read = [0 for _ in devices]
+        # buffer = {}  # dictionary to hold buffers per device
+        # for i, device in enumerate(devices):
+        #     buffer[i] = bytearray(num_samples_per_buffer * bytes_per_sample)
+        # num_samples_read = [0 for _ in devices]
 
 
 
@@ -409,7 +458,7 @@ class BladeRFController:
         # Create receive buffer for interleaved RX_X2 (I0, Q0, I1, Q1)
 
         # TODO: check if this is correct:
-        num_samples_per_channel = num_samples_per_buffer / 2  # TODO: or //2
+        num_samples_per_channel = num_samples_per_buffer // 2  # TODO: or //2
 
         # buf0 = _bladerf.ffi.new("int16_t[]", buffer_size * 2)
         # buf1 = _bladerf.ffi.new("int16_t[]", buffer_size * 2)
@@ -464,7 +513,7 @@ class BladeRFController:
         Worker function for receiving data from a single BladeRF device.
         """
 
-        global data_of_device
+
 
         bytes_per_sample = 4 * 2  # 2 bytes I + 2 bytes Q == 4 bytes for 1 channel, so for 2 channels, it will be 2*that
         num_samples_per_buffer = 8192 * 2  # total samples (I+Q pairs), shared across RX0 and RX1, NOT INTERLEAVED
@@ -488,7 +537,7 @@ class BladeRFController:
                 num = len(buf) // bytes_per_sample
 
             # Receive samples into the buffer
-            device.sync_rx(buffer, num)
+            device.sync_rx(buf, num)
 
             # This keeps track of how many samples have been read so far.
             num_samples_read += num
@@ -497,9 +546,16 @@ class BladeRFController:
             raw_copy = bytes(buf[:num_samples_per_buffer * bytes_per_sample])
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
 
-            # Push to writer queue (blocks if queue is full)
-            self.write_queue.put((timestamp, raw_copy))
-
+            try:
+                # Push to writer queue (blocks if queue is full)
+                self.write_queue[device].put((timestamp, raw_copy), timeout=1.0)
+            except queue.Full:
+                print(f"[RX] Error: write queue for device {device} is full! Data may be delayed or lost.")
+                # Get current timestamp
+                error_ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+                # Append to error_logs file
+                with open("error_logs/error_logs.txt", "a") as ef:
+                    ef.write(f"{error_ts} - Device {device} write queue full\n")
 
 
             # Write to file main "all-inclusive" I-Q data file
@@ -507,19 +563,29 @@ class BladeRFController:
 
             # buf[:num * bytes_per_sample]: a slice of the buffer that includes only the valid portion
             # (i.e. just the bytes that were filled with new data).
+            try:
+                # converts the raw byte data in buf into 16-bit integers, representing the received signal samples (I/Q data).
+                # raw_copy = bytes(buf[:num * bytes_per_sample])  # immutable copy of bytes
 
-            # converts the raw byte data in buf into 16-bit integers, representing the received signal samples (I/Q data).
-            # raw_copy = bytes(buf[:num * bytes_per_sample])  # immutable copy of bytes
-            data_of_device[device] = np.frombuffer(raw_copy, dtype=np.int16).copy()  # or just store raw_copy and convert later
-            #important: frombuffer does not copy the data, it just interprets the memory. Normally, that’s fine—but np.frombuffer creates a read-only view if the underlying buffer is immutable (as in bytes).
-            #.copy: Forces NumPy to allocate a new, writable array in memory.
-            #In Python, bytes() creates an immutable copy of the data you give it.
+                #TODO: dont forget to do this on the fft thread side: self.data_of_device[device] = np.frombuffer(raw_copy, dtype=np.int16).copy()  # or just store raw_copy and convert later
+                self.data_of_device[device].put(raw_copy, timeout=1.0)
+            except queue.Full:
+                print(f"[RX] Data queue full for device {device} - FFT may skip a sample")
+                error_ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+                # Append to error_logs file
+                with open("error_logs/error_logs.txt", "a") as ef:
+                    ef.write(f"{error_ts} - Device {device} had a full queue of 'data_of_device'. \n")
 
-            # If you do bytes(buf[:n]) where buf is a bytearray, it returns a new bytes object containing the same bytes, but you cannot change it afterwards (unlike a bytearray, which is mutable).
-            #
-            # This is exactly why we use it here: it prevents the RX thread from accidentally overwriting the data while another thread (FFT or plotting) is reading it.
 
-            # inside class BladeRFController
+                #important: frombuffer does not copy the data, it just interprets the memory. Normally, that’s fine—but np.frombuffer creates a read-only view if the underlying buffer is immutable (as in bytes).
+                #.copy: Forces NumPy to allocate a new, writable array in memory.
+                #In Python, bytes() creates an immutable copy of the data you give it.
+
+                # If you do bytes(buf[:n]) where buf is a bytearray, it returns a new bytes object containing the same bytes, but you cannot change it afterwards (unlike a bytearray, which is mutable).
+                #
+                # This is exactly why we use it here: it prevents the RX thread from accidentally overwriting the data while another thread (FFT or plotting) is reading it.
+
+
 
     def writer_thread_fn(self, device):
         """
@@ -535,7 +601,7 @@ class BladeRFController:
         # Continue while not asked to stop OR while there are still items to write
         while not (self.stop_event.is_set() and self.write_queue[device].empty()):
             try: #TODO: check if "self.write_queue[device].get(timeout=0.5)" is correct!
-                device, timestamp, raw_bytes = self.write_queue[device].get(timeout=0.5) #TODO: timeout is an unexpected argument, also
+                timestamp, raw_bytes = self.write_queue[device].get(timeout=0.5) #TODO: timeout is an unexpected argument, also
             except queue.Empty:
                 # no item available right now -> loop and re-check stop condition
                 continue
@@ -572,113 +638,249 @@ class BladeRFController:
         - Computes FFT in both linear and dB scales
         - Returns results as a dictionary keyed by device
         """
+        while not stop_event.is_set():
 
-        global data_of_device
-
-        # Check if we have data for this device
-        if device not in data_of_device or len(data_of_device[device]) == 0:
-            print("Device {} not found, or sth else idk")
-            return None
-
-        fs = int(config.getfloat('[bladerf2-rx]', 'rx_samplerate'))
-        center_freq_hz = int(config.getfloat('[bladerf2-rx]', 'rx_frequency'))
-
-        # ---- Deinterleave [I0,Q0,I1,Q1,...] ----
-        raw = data_of_device[device]
-        i0 = raw[0::4].astype(np.float32) #TODO: search whether this is better than int16, float64 etc....
-        q0 = raw[1::4].astype(np.float32)
-        i1 = raw[2::4].astype(np.float32)
-        q1 = raw[3::4].astype(np.float32)
-
-        # Complex arrays per channel
-        ch0 = i0 + 1j * q0
-        ch1 = i1 + 1j * q1
-
-        # Full interleaved IQ for FFT
-        iq = raw[::2].astype(np.float32) + 1j * raw[1::2].astype(np.float32)
-
-        results = {}
-
-        # ---------------- Approach 1: Linear FFT (for computation/integration) ----------------
-        window = np.hanning(len(iq))
-        iq_windowed = iq * window
-        norm_factor = np.sum(window) / len(window)
-
-        fft_vals_linear = np.fft.fftshift(np.fft.fft(iq_windowed))
-        fft_vals_linear /= (len(iq) * norm_factor)
-        power_spectrum = np.abs(fft_vals_linear) ** 2
-
-        freqs = np.fft.fftshift(np.fft.fftfreq(len(iq), 1 / fs))
-        freqs_abs = freqs + center_freq_hz  # absolute frequency axis
-
-        # Select only BW for summing (around center frequency)
-        half_bw = int(config.getfloat('BW-Summing', 'BW_FOR_BW_SUMMING')) / 2
-        valid_indices = np.where(
-            (freqs_abs >= center_freq_hz - half_bw) &
-            (freqs_abs <= center_freq_hz + half_bw)
-        )[0]
-
-        results['linear_fft'] = fft_vals_linear
-        results['power_spectrum'] = power_spectrum
-        results['freqs'] = freqs_abs
-        results['valid_indices'] = valid_indices
-
-        # ---------------- Approach 2: FFT in dB scale (for plotting) ----------------
-        buffer = iq.copy()  # reuse IQ array
-        buffer -= np.mean(buffer)  # remove DC offset
-        window = np.hanning(len(buffer))
-        buffer_windowed = buffer * window
-        buffer_windowed -= np.mean(buffer_windowed)  # optional extra DC removal
-
-        normalization_factor = np.sum(window) / len(window)
-        fft_vals = np.fft.fftshift(np.fft.fft(buffer_windowed))
-        fft_vals /= (len(buffer) * normalization_factor)
-        fft_db = 20 * np.log10(np.abs(fft_vals) + 1e-12)  # dB scale
-
-        results['fft_db'] = fft_db
-
-        # Optionally, downsample for plotting to save CPU
-        downsample_factor = max(1, len(fft_db) // 1024)  # keep ~1024 points for real-time plotting
-        results['fft_db_plot'] = fft_db[::downsample_factor]
-        results['freqs_plot'] = freqs_abs[::downsample_factor]
+            fft_results = {}
 
 
-        # ------------- "Approach" 3 ==> GUI FFT downsampling -----------------------------
+            # Check if we have data for this device
+            if device not in self.data_of_device or self.data_of_device[device].empty():
+                print("Device {} not found, or sth else idk")
+                time.sleep(0.01)  # optional, avoid busy-looping
+                continue
 
-        # Downsample for GUI only (e.g., take 1 out of every 500 samples)
-        step = max(len(iq) // int(config.getfloat('FFT-Parameters', 'TARGET_FFT_SIZE')), 1)
 
-        ch0_downsampled = ch0[::step]
-        ch1_downsampled = ch1[::step]
 
-        # Update shared_buffer safely
-        with buffer_lock[device]:
+            fs = int(self.config.getfloat('bladerf2-rx', 'rx_samplerate'))
+            center_freq_hz = int(self.config.getfloat('bladerf2-rx', 'rx_frequency'))
+
+            # Get the raw bytes from the queue (non-blocking)
             try:
-                # shared_buffer.put_nowait(iq_downsampled)
-                shared_buffer[device][0].append(ch0_downsampled)
-                shared_buffer[device][1].append(ch1_downsampled)
+                raw_bytes = self.data_of_device[device].get_nowait()  # raw bytes from RX thread
+            except queue.Empty:
+                # No data yet, skip iteration
+                time.sleep(0.001)  # tiny sleep prevents CPU spinning
+                continue
 
-            except queue.Full:
-                pass  # Drop the new data instead of blocking
 
-        return results
+            # Convert bytes → int16 NumPy array, make independent copy
+            raw = np.frombuffer(raw_bytes, dtype=np.int16).copy()
 
-    def start_threads(self, devices, buffer, num_samples, stop_event, rxfiles):
+            # ---- Deinterleave [I0,Q0,I1,Q1,...] ----
+            i0 = raw[0::4]      #TODO: search whether this is better than int16, float64 etc....
+            q0 = raw[1::4]
+            i1 = raw[2::4]
+            q1 = raw[3::4]
+
+            # Complex arrays per channel
+            ch0 = i0 + 1j * q0
+            ch1 = i1 + 1j * q1
+
+            ch_combined = ch0 + ch1
+
+            # Full interleaved IQ for FFT
+            # iq = raw[::2].astype(np.float32) + 1j * raw[1::2].astype(np.float32)
+
+
+
+            # ---------------- Approach 1: Linear FFT (for computation/integration) ----------------
+            # --- Per-channel FFT calculation with proper normalization and DC removal ---
+
+            #TODO: check old main.py fft calculations and change these appropriately...i dont think they are good and comprehensive
+            # Channel 0
+            if self.calc_ch0:
+                window0 = np.hanning(len(ch0))
+                norm_factor0 = np.sum(window0) / len(window0)
+                ch0_windowed = ch0 * window0
+                ch0_windowed -= np.mean(ch0_windowed)  # remove DC after windowing
+                fft_ch0_linear = np.fft.fftshift(np.fft.fft(ch0_windowed))
+                fft_ch0_linear /= (len(ch0_windowed) * norm_factor0)
+                fft_ch0_power = np.abs(fft_ch0_linear) ** 2
+                fft_ch0_db = 20 * np.log10(np.abs(fft_ch0_linear) + 1e-12)
+
+                fft_results['ch0_fft_linear'] = fft_ch0_linear
+                fft_results['ch0_power'] = fft_ch0_power
+                fft_results['ch0_fft_db'] = fft_ch0_db
+
+                try:
+                    self.results[device]["CH0"].put_nowait(fft_results['ch0_fft_db'])
+                except queue.Full:
+                    pass
+
+
+
+
+            # Channel 1
+            if self.calc_ch1:
+                window1 = np.hanning(len(ch1))
+                norm_factor1 = np.sum(window1) / len(window1)
+                ch1_windowed = ch1 * window1
+                ch1_windowed -= np.mean(ch1_windowed)  # remove DC after windowing
+                fft_ch1_linear = np.fft.fftshift(np.fft.fft(ch1_windowed))
+                fft_ch1_linear /= (len(ch1_windowed) * norm_factor1)
+                fft_ch1_power = np.abs(fft_ch1_linear) ** 2
+                fft_ch1_db = 20 * np.log10(np.abs(fft_ch1_linear) + 1e-12)
+
+                fft_results['ch1_fft_linear'] = fft_ch1_linear
+                fft_results['ch1_power'] = fft_ch1_power
+                fft_results['ch1_fft_db'] = fft_ch1_db
+
+                try:
+                    self.results[device]["CH1"].put_nowait(fft_results['ch1_fft_db'])
+                except queue.Full:
+                    pass
+
+
+            # Combined channel (ch0 + ch1)
+            if self.calc_ch0_ch1:
+                # sum channels
+                window_comb = np.hanning(len(ch_combined))
+                norm_factor_comb = np.sum(window_comb) / len(window_comb)
+                combined_windowed = ch_combined * window_comb
+                combined_windowed -= np.mean(combined_windowed)  # remove DC after windowing
+                fft_comb_linear = np.fft.fftshift(np.fft.fft(combined_windowed))
+                fft_comb_linear /= (len(combined_windowed) * norm_factor_comb)
+                fft_comb_power = np.abs(fft_comb_linear) ** 2
+                fft_comb_db = 20 * np.log10(np.abs(fft_comb_linear) + 1e-12)
+
+                fft_results['ch0_ch1_fft_linear'] = fft_comb_linear
+                fft_results['ch0_ch1_power'] = fft_comb_power
+                fft_results['ch0_ch1_fft_db'] = fft_comb_db
+
+                try:
+                    self.results[device]["CH0+CH1"].put_nowait(fft_results['ch0_ch1_fft_db'])
+                except queue.Full:
+                    pass
+
+            #----------------------------------------------------------------------------------------------
+
+            # Use the channel length (same for ch0, ch1, ch0+ch1)
+
+            freqs = np.fft.fftshift(np.fft.fftfreq(len(ch0), 1 / fs)) #or ch1, since len(ch0) == len(ch1)
+            freqs_abs = freqs + center_freq_hz  # absolute frequency axis
+
+            # Save frequency axis for plotting
+            self.last_freqs[device] = freqs_abs
+
+            # Select only BW for summing (around center frequency)
+            half_bw = int(self.config.getfloat('BW-Summing', 'BW_FOR_BW_SUMMING')) / 2
+            valid_indices = np.where(
+                (freqs_abs >= center_freq_hz - half_bw) &
+                (freqs_abs <= center_freq_hz + half_bw)
+            )[0]
+
+            # Store in results (shared for all channels)
+            fft_results['freqs'] = freqs_abs
+            fft_results['valid_indices'] = valid_indices
+
+            # ------------- "Approach" 3 ==> GUI FFT downsampling -----------------------------
+
+            # Determine downsampling step based on TARGET_FFT_SIZE
+            step = max(len(ch0) // int(self.config.getfloat('FFT-Parameters', 'TARGET_FFT_SIZE')), 1)
+
+            # Downsample channels according to flags
+            ch0_downsampled = ch0[::step] if self.calc_ch0 else None
+            ch1_downsampled = ch1[::step] if self.calc_ch1 else None
+            ch0ch1_downsampled = (ch0 + ch1)[::step] if self.calc_ch0_ch1 else None
+
+            # Update shared_buffer safely
+            with self.buffer_lock[device]:
+                try:
+                    if self.calc_ch0 and ch0_downsampled is not None:
+                        self.shared_buffer[device][0].append(ch0_downsampled)
+                    if self.calc_ch1 and ch1_downsampled is not None:
+                        self.shared_buffer[device][1].append(ch1_downsampled)
+                    if self.calc_ch0_ch1 and ch0ch1_downsampled is not None:
+                        self.shared_buffer[device][2].append(ch0ch1_downsampled)
+                except queue.Full:
+                    pass  # Drop new data instead of blocking
+
+
+
+
+    def start_plot_thread(self):
         """
-        Launch separate threads to receive data from multiple BladeRF devices simultaneously.
+        Creates 1 plot per device, 3 curves per plot (CH0, CH1, CH0+CH1),
+        and starts a QTimer to update them.
+        """
+        for device in self.devices:
+            win = pg.GraphicsLayoutWidget(title=f"FFT Plot - {device}")
+            win.show()
+            plot = win.addPlot(title=f"{device} FFT (dB)")
+            plot.setLabel('bottom', 'Frequency (MHz)')
+            plot.setLabel('left', 'Magnitude (dB)')
+            plot.setYRange(-100, 10, padding=0)  # adjust as needed
+
+            # 3 curves per device
+            ch0_curve = plot.plot(pen='r', name="CH0")
+            ch1_curve = plot.plot(pen='b', name="CH1")
+            ch_comb_curve = plot.plot(pen='g', name="CH0+CH1")
+
+            self.device_plots[device] = {
+                "plot": plot,
+                "CH0": ch0_curve,
+                "CH1": ch1_curve,
+                "CH0+CH1": ch_comb_curve
+            }
+
+        # Timer updates all device plots
+        self.plot_timer.timeout.connect(self._update_device_plots)
+        self.plot_timer.start(100)  # every 100 ms
+
+    def _update_device_plots(self):
+        """
+        Pulls latest FFT data from results queues and updates all device plots.
+        """
+        for device in self.devices:
+            curves = self.device_plots[device]
+
+            for mode in ["CH0", "CH1", "CH0+CH1"]:
+                fft_curve = curves[mode]
+
+                # Pull latest FFT from queue (non-blocking)
+                latest_fft = None
+                while not self.results[device][mode].empty():
+                    try:
+                        latest_fft = self.results[device][mode].get_nowait()
+                    except queue.Empty:
+                        break
+
+                if latest_fft is not None:
+                    freqs = self.last_freqs.get(device)
+                    if freqs is not None:
+                        fft_curve.setData(freqs / 1e6, latest_fft)  # MHz
+
+    def start_threads(self, devices, buffer, num_samples, rxfiles):
+        """
+        Launch separate threads to receive data from multiple BladeRF devices simultaneously,
+        plus a single plot timer thread.
         """
         rx_threads = []
+        data_threads = []
 
         for i, device in enumerate(devices):
-            t = threading.Thread(
+            # RX worker thread
+            t_rx = threading.Thread(
                 target=self.rx_worker,
-                args=(device, buffer[i], num_samples, stop_event, rxfiles[i])
+                args=(device, buffer[i], num_samples, self.stop_event, rxfiles[i]),
+                daemon=True
             )
-            t.start()
-            rx_threads.append(t)
+            t_rx.start()
+            rx_threads.append(t_rx)
 
-        return rx_threads
+            # Data handler thread
+            t_data = threading.Thread(
+                target=self._data_handler,  # calls _data_handler in a loop
+                args=(device,),
+                daemon=True
+            )
+            t_data.start()
+            data_threads.append(t_data)
 
+        # Start plot timer (Qt-safe)
+        self.start_plot_thread()
+
+        return rx_threads, data_threads
 
     def _set_transceiver_parameters(self):
         """ Set RX/TX parameters """
