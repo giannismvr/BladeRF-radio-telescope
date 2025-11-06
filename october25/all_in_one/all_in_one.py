@@ -1,8 +1,5 @@
-import signal
 import threading
-from datetime import datetime
-from multiprocessing.pool import ThreadPool
-from configparser import ConfigParser
+import datetime
 from bladerf import _bladerf
 import time
 import queue
@@ -14,7 +11,6 @@ from PyQt5 import QtCore, QtWidgets
 import pyqtgraph as pg
 from collections import deque
 from bladerf._bladerf import Correction
-from typing import Optional
 
 
 #------------------------- MAIN CLASS --------------------------------------------------------------------
@@ -27,12 +23,31 @@ class BladeRFController:
     Encapsulates BladeRF initialization, FPGA loading, version reporting, and threading setup.
     """
 
+    #TODO: incorporate all def's that have to do with device in "class Device". Careful, not initialization, but stuff like print_board_info()
+
+    class Device(_bladerf.BladeRF):
+        def __init__(self, device_str):
+            super().__init__(device_str)
+            self.device_string = device_str
+
+            # self.device = _bladerf.BladeRF(self.device_string)
+            self.name = self.board_name
+
     def __init__(self, config_path="/all_parameters.ini", calc_ch0 = False, calc_ch1 = False, calc_ch0_ch1 = True):
+
+        self.devices = []
+
+
+
+
+
+
+
         self.config_path = config_path
         self.config = ConfigParser()
         self.config.read(self.config_path)
-        self.devices = []
-        self.boards = []
+
+        # self.boards = []
         self.tx_pool = None
         self.rx_pool = None
 
@@ -42,7 +57,7 @@ class BladeRFController:
         self.rx_freq=None
         self.rx_channel0 = None
         self.rx_channel1 = None
-
+        print("efoihwaoufhaw")
         #TODO: perhaps it would be better to initialize everything in the constructor, as some attributes may not be visible in the code, if the respective objects are declared in the "dict_init" def.... !!!!
         self.write_queue = {}
         self.data_of_device = {}
@@ -66,9 +81,9 @@ class BladeRFController:
 
         self.calculation = {}
 
-        self.num_samples = []
+        self.num_samples = {}
 
-        self.my_bladerf = []
+        # self.my_bladerf = []
 
         self.config_path = 'all_parameters.ini'
 
@@ -98,17 +113,41 @@ class BladeRFController:
         # Call main initialization
         #TODO: check if this is the correct sequence for initialization
 
+
+
+
+        self.bladerf_object_list = [self.devices]
+
+
+        # self._print_board_info(self.my_bladerf)
         self._initialize_device()
+        # time.sleep(2)
+        print("a")
         self._initialize_dictionaries()
+        # time.sleep(2)
+        print("b")
         self._set_verbosity()
-        uut = self._probe_bladerf()
-        for idx in range(len(uut)):
-            self.my_bladerf[idx] = _bladerf.BladeRF(uut[idx])
-        self._print_board_info(self.my_bladerf)
-        self._load_fpga_if_enabled(self.my_bladerf)
+        # time.sleep(2)
+        print("a")
+
+        # time.sleep(2)
+        print("a")
+
+        print("PRINTEEEED")
+        # time.sleep(2)
+        print("a")
+
+
+        print("self:", self.bladerf_object_list)
+        self._load_fpga_if_enabled(self.devices)
+        # time.sleep(2)
+        print("a")
         self._configure_rx_parameters()
+        # time.sleep(2)
+        print("a")
 
         self.start_threads(self.devices)
+
 
 
 
@@ -120,29 +159,45 @@ class BladeRFController:
         # TODO: check whether the thread pool is necessary, perhaps unusable.
         # TODO: perhaps we need to do pool.close or pool.join -> investigate!!!
 
+    def _create_devices(self):
+        # uuts = self._probe_bladerf()
+        for idx, uut_str in enumerate(self.uuts):
+            # self.devices[idx] = BladeRFController.Device(uut)
+            try:
+                dev = BladeRFController.Device(uut_str)
+            except Exception:
+                # handle per-device init failure gracefully
+                raise
+            self.devices.append(dev)
+
+
+
     # ──────────────── Main initializer ────────────────
     def _initialize_device(self):
 
 
         """Runs the full initialization sequence."""
         self._set_verbosity()
-        self.devices = self._probe_bladerf()
+        self.uuts = self._probe_bladerf()
+        self._create_devices()
+
+
         if not self.devices:
             print("No BladeRF detected. Exiting.")
             self.shutdown(-1)
 
         # Create BladeRF objects for each detected device
-        self.boards = []
-        for device_str in self.devices:
+        # self.boards = []
+        for device in self.devices:
             try:
-                board = _bladerf.BladeRF(device_str)
-                self.boards.append(board)
-                print(f"Initialized board: {board.board_name}")
+                # board = _bladerf.BladeRF(device_str)
+                # self.boards.append(board)
+                print(f"Initialized board: {device.name}")
             except _bladerf.BladeRFError as e:
-                print(f"Error initializing device {device_str}: {e}")
+                print(f"Error initializing device {device.name}: {e}")
 
         # Optionally, still load FPGA for each board
-        for board in self.boards:
+        for board in self.bladerf_object_list:
             self._load_fpga_if_enabled(board)
             self._print_board_info(board)
 
@@ -168,8 +223,9 @@ class BladeRFController:
         for device in self.devices:  # devices is a list of device identifiers
             self.buffer_lock[device] = threading.Lock()
             self.shared_buffer[device] = {
-                0: deque(maxlen=10),  # RX channel 0
-                1: deque(maxlen=10),  # RX channel 1
+                0: queue.Queue(maxsize=10),  # RX channel 0
+                1: queue.Queue(maxsize=10),  # RX channel 1
+                2: queue.Queue(maxsize=10),  # optional cross-channel or combined data
             }
 
 
@@ -270,7 +326,10 @@ class BladeRFController:
     # ──────────────── FPGA load ────────────────
     def _load_fpga_if_enabled(self, bladerf_object_list):
         """Load FPGA image(s) if the configuration enables it."""
-        for board in bladerf_object_list:
+        print([bladerf_object_list])
+        print("DEBUG:", type(bladerf_object_list), bladerf_object_list)
+        print(f"bladerf_object_list: {type(bladerf_object_list)}")
+        for i, board in enumerate(bladerf_object_list):
             board_name = board.board_name
             enabled = self.config.getboolean(f"{board_name}-load-fpga", 'enable')
             if not enabled:
@@ -300,7 +359,7 @@ class BladeRFController:
     def shutdown(self, error=0):
         """Close all BladeRF boards and exit."""
         print(f"Shutting down with error code {error}")
-        for board in self.boards:
+        for board in self.devices:
             try:
                 board.close()
             except Exception:
@@ -330,7 +389,7 @@ class BladeRFController:
         #     else:
         #         print(f"[Device {idx}] Failed to get correction values: ret_i={ret_i}, ret_q={ret_q}")
 
-        for board_idx, board in enumerate(self.boards):
+        for board_idx, board in enumerate(self.devices):
             for ch_index in [0, 1]:  # RX channels
                 ch = board.Channel(ch_index)  # create channel object
                 ch.frequency = self.freq
@@ -339,10 +398,11 @@ class BladeRFController:
             print(f"[{board.board_name}] RX channels configured: freq={self.freq}, rate={self.rate}, gain={self.gain}")
 
         # TODO: this must be done after the gain, freq settings (eg ch.gain = ....)
-        for board in self.boards:
+        for board in self.devices:
             # Enable RX channels 0 and 1
             for ch_index in [0, 1]:
                 board.enable_module(_bladerf.CHANNEL_RX(ch_index), True)
+                print("succesfully enabled channel RX", ch_index)
             print(f"[{board.board_name}] RX channels enabled")
 
             # Actual gain I am getting - no matter what.
@@ -351,7 +411,7 @@ class BladeRFController:
             # if i set it to 1000db via the my_config.ini file, it will get clamped to 60db
             # and this print below shows exactly that:
 
-        for board in self.boards:
+        for board in self.devices:
             for ch_index in [0, 1]:
                 ch = board.Channel(ch_index)
                 print(f"[{board.board_name}][RX{ch_index}] Actual gain applied:", ch.gain)
@@ -374,7 +434,7 @@ class BladeRFController:
 
         # for channel 1 AND channel 2 according to gpt
         # RX_X2 literally enables both RX channels, not just RX2.
-        for board in self.boards:
+        for board in self.devices:
             board.sync_config(
                 layout=_bladerf.ChannelLayout.RX_X2,
                 fmt=_bladerf.Format.SC16_Q11,
@@ -385,7 +445,7 @@ class BladeRFController:
             )
             print(f"Sync configured for board {board.board_name}")
 
-        for board in self.boards:
+        for board in self.devices:
             for ch_index in [0, 1]:  # adjust if more RX channels per board
                 ch = board.Channel(ch_index)
                 current_lo_freq = ch.frequency  # returns LO frequency in Hz
@@ -491,7 +551,7 @@ class BladeRFController:
         while not self.stop_event.is_set():
             if self.num_samples[device] > 0 and num_samples_read == self.num_samples:
                 break
-            elif self.num_samples > 0:
+            elif self.num_samples[device] > 0:
                 print(f"len buf =={len(buf)}")  # this prints (bytes_per_sample * num_samples_per_buffer)
                 num = min(len(buf) // self.bytes_per_sample,
                           self.num_samples[device] - num_samples_read)
@@ -511,7 +571,7 @@ class BladeRFController:
 
             # Make an immutable copy of buffer for safe passing
             raw_copy = bytes(buf[:num_samples_per_buffer * self.bytes_per_sample])
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
 
             try:
                 # Push to writer queue (blocks if queue is full)
@@ -535,7 +595,8 @@ class BladeRFController:
                 # raw_copy = bytes(buf[:num * bytes_per_sample])  # immutable copy of bytes
 
                 #TODO: dont forget to do this on the fft thread side: self.data_of_device[device] = np.frombuffer(raw_copy, dtype=np.int16).copy()  # or just store raw_copy and convert later
-                self.data_of_device[device].put(raw_copy, timeout=1.0)
+                self.data_of_device[device].put(raw_copy)
+                print("AAerkgverjovebjierbjgw4e", self.data_of_device[device].qsize(), "hjkefbihqwbf", len(raw_copy))
             except queue.Full:
                 print(f"[RX] Data queue full for device {device} - FFT may skip a sample")
                 error_ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -613,6 +674,7 @@ class BladeRFController:
             # Check if we have data for this device
             if device not in self.data_of_device or self.data_of_device[device].empty():
                 print("Device {} not found, or sth else idk")
+                print(self.data_of_device[device])
                 time.sleep(0.01)  # optional, avoid busy-looping
                 continue
 
@@ -634,7 +696,8 @@ class BladeRFController:
             raw = np.frombuffer(raw_bytes, dtype=np.int16).copy()
 
             # ---- Deinterleave [I0,Q0,I1,Q1,...] ----
-            i0 = raw[0::4]      #TODO: search whether this is better than int16, float64 etc....
+            # TODO: search whether this is better than int16, float64 etc....
+            i0 = raw[0::4]
             q0 = raw[1::4]
             i1 = raw[2::4]
             q1 = raw[3::4]
@@ -751,16 +814,21 @@ class BladeRFController:
             ch0ch1_downsampled = (ch0 + ch1)[::step] if self.calc_ch0_ch1 else None
 
             # Update shared_buffer safely
+
+            # Build list of (index, data) to append
+            channels = [
+                (self.calc_ch0, 0, ch0_downsampled),
+                (self.calc_ch1, 1, ch1_downsampled),
+                (self.calc_ch0_ch1, 2, ch0ch1_downsampled),
+            ]
+
             with self.buffer_lock[device]:
-                try:
-                    if self.calc_ch0 and ch0_downsampled is not None:
-                        self.shared_buffer[device][0].append(ch0_downsampled)
-                    if self.calc_ch1 and ch1_downsampled is not None:
-                        self.shared_buffer[device][1].append(ch1_downsampled)
-                    if self.calc_ch0_ch1 and ch0ch1_downsampled is not None:
-                        self.shared_buffer[device][2].append(ch0ch1_downsampled)
-                except queue.Full:
-                    pass  # Drop new data instead of blocking
+                for flag, idx, data in channels:
+                    if flag and data is not None:
+                        try:
+                            self.shared_buffer[device][idx].put_nowait(data)
+                        except queue.Full:
+                            pass  # drop new data if full
 
 
     def start_plot_thread(self):
@@ -823,12 +891,12 @@ class BladeRFController:
         rx_threads = []
         data_threads = []
         writer_threads = []
-
-        for i, device in enumerate(devices):
+        print("self. devices print:", self.devices)
+        for i, device in enumerate(self.devices):
             # RX worker thread
             t_rx = threading.Thread(
                 target=self.rx_worker,
-                args=(device),
+                args=(device,), # <-- note the comma
                 daemon=True
             )
             t_rx.start()
@@ -859,17 +927,7 @@ class BladeRFController:
 
         return rx_threads, data_threads, writer_threads
 
-    def _set_transceiver_parameters(self):
-        """ Set RX/TX parameters """
-
-
-
-
-    def _set_experimental_parameters(self):
-        """ I am not sure about those yet """
-
-
 
 if __name__ == "__main__":
-    trial = BladeRFController
+    trial = BladeRFController()
     time.sleep(100000)
